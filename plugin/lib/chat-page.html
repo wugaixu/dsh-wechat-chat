@@ -961,11 +961,9 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     if (on) {
       voiceHint.classList.add('cancelling');
       voiceHintLabel.textContent = '松开取消';
-      voiceCancelHintText.textContent = '松开取消';
     } else {
       voiceHint.classList.remove('cancelling');
       voiceHintLabel.textContent = '正在识别，松开结束';
-      voiceCancelHintText.textContent = '上滑取消';
     }
   }
   holdTalk.addEventListener('touchstart', function (e) {
@@ -976,6 +974,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     voiceHint.classList.remove('cancelling');
     voiceHintText.textContent = '';
     voiceHintLabel.textContent = '正在识别，松开结束';
+    voiceCancelHintText.textContent = '上滑取消';
     holdTalk.classList.add('recording');
     showVoiceHint(true);
     try { if (window.WechatBridge && window.WechatBridge.startVoice) window.WechatBridge.startVoice(); }

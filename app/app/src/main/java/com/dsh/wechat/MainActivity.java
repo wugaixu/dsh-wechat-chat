@@ -311,8 +311,7 @@ public class MainActivity extends AppCompatActivity {
                         .put("language", "zh_cn")
                         .put("domain", "iat")
                         .put("accent", "mandarin")
-                        .put("ptt", 1)
-                        .put("dwa", "wpgs"));
+                        .put("ptt", 1));
             }
             frame.put("data", data);
             ws.send(frame.toString());
