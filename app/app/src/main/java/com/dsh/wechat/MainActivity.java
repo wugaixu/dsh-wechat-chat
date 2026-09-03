@@ -55,6 +55,7 @@ public class MainActivity extends AppCompatActivity {
     private String pendingPickKind = "avatar";
     private ASR iflyAsr = null;
     private boolean voiceActive = false;
+    private int iflyInitCode = -1;
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -157,11 +158,12 @@ public class MainActivity extends AppCompatActivity {
                     .apiSecret("ccbe233d65d840587c4e00300412f46e")
                     .workDir(getFilesDir().getAbsolutePath())
                     .logLevel(100); // 关闭日志
-            int ret = SparkChain.getInst().init(getApplicationContext(), config);
-            if (ret != 0) {
-                android.util.Log.w("wechat-chat", "SparkChain init failed: " + ret);
+            iflyInitCode = SparkChain.getInst().init(getApplicationContext(), config);
+            if (iflyInitCode != 0) {
+                android.util.Log.w("wechat-chat", "SparkChain init failed: " + iflyInitCode);
             }
         } catch (Throwable t) {
+            iflyInitCode = -998;
             android.util.Log.w("wechat-chat", "SparkChain init error: " + t);
         }
     }
@@ -173,6 +175,10 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         if (voiceActive) { voiceError("正在识别中，请稍候"); return; }
+        if (iflyInitCode != 0) {
+            voiceError("讯飞 SDK 初始化失败（" + iflyInitCode + "）");
+            return;
+        }
         try {
             stopIflyVoice();
             final ASR asr = new ASR("zh_cn", "iat", "mandarin");
