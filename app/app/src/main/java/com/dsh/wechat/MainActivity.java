@@ -2,9 +2,11 @@ package com.dsh.wechat;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
@@ -39,6 +41,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -178,7 +181,10 @@ public class MainActivity extends AppCompatActivity {
         // 每次重建，避免上次错误留下的陈旧状态导致 ERROR_CLIENT
         destroyRecognizer();
         try {
-            final SpeechRecognizer rec = SpeechRecognizer.createSpeechRecognizer(this);
+            final ComponentName general = findGeneralRecognitionService();
+            final SpeechRecognizer rec = general != null
+                    ? SpeechRecognizer.createSpeechRecognizer(this, general)
+                    : SpeechRecognizer.createSpeechRecognizer(this);
             speechRecognizer = rec;
             rec.setRecognitionListener(makeListener());
             final Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
@@ -196,6 +202,27 @@ public class MainActivity extends AppCompatActivity {
         } catch (Exception e) {
             voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
         }
+    }
+
+    /**
+     * 枚举设备上的语音识别服务，跳过“唤醒词/助手类”服务（如 vivo Copilot wakeup），
+     * 返回第一个看起来像“通用语音转文字”的服务；找不到则返回 null（回退默认）。
+     */
+    private ComponentName findGeneralRecognitionService() {
+        try {
+            PackageManager pm = getPackageManager();
+            Intent probe = new Intent("android.speech.RecognitionService");
+            List<ResolveInfo> services = pm.queryIntentServices(probe, 0);
+            for (ResolveInfo ri : services) {
+                if (ri == null || ri.serviceInfo == null) continue;
+                ComponentName cn = new ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name);
+                String key = (cn.getPackageName() + "/" + cn.getClassName()).toLowerCase();
+                if (key.contains("wakeup") || key.contains("copilot") || key.contains("hotword")
+                        || key.contains("wakeword") || key.contains("wake")) continue;
+                return cn;
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     private RecognitionListener makeListener() {
