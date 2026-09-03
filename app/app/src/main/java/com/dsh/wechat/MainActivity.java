@@ -77,7 +77,7 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean voiceCancelled = false;
     private volatile boolean voiceReleased = false;
     private String voiceFinalText = null; // 仅 UI 线程访问
-    private final StringBuilder voiceText = new StringBuilder();
+    private final java.util.List<String> voiceSegments = new java.util.ArrayList<>();
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -197,7 +197,7 @@ public class MainActivity extends AppCompatActivity {
         voiceCancelled = false;
         voiceReleased = false;
         voiceFinalText = null;
-        synchronized (voiceText) { voiceText.setLength(0); }
+        synchronized (voiceSegments) { voiceSegments.clear(); }
         try {
             String url = buildIatUrl();
             OkHttpClient client = new OkHttpClient.Builder()
@@ -284,9 +284,7 @@ public class MainActivity extends AppCompatActivity {
                 // 兜底：发完结束帧 5 秒仍无最终结果，用已累计文字收尾
                 runOnUiThread(() -> webView.postDelayed(() -> {
                     if (voiceRunning && voiceFinalText == null) {
-                        final String t;
-                        synchronized (voiceText) { t = voiceText.toString(); }
-                        finishVoice(t);
+                        finishVoice(voiceFullText());
                     }
                 }, 5000));
             });
@@ -313,7 +311,8 @@ public class MainActivity extends AppCompatActivity {
                         .put("language", "zh_cn")
                         .put("domain", "iat")
                         .put("accent", "mandarin")
-                        .put("ptt", 1));
+                        .put("ptt", 1)
+                        .put("dwa", "wpgs"));
             }
             frame.put("data", data);
             ws.send(frame.toString());
@@ -353,12 +352,25 @@ public class MainActivity extends AppCompatActivity {
                             if (w != null) sb.append(w);
                         }
                     }
-                    synchronized (voiceText) { voiceText.append(sb.toString()); }
+                    // 动态修正（dwa=wpgs）：pgs=rpl 表示替换之前某段结果
+                    String pgs = result.optString("pgs", "");
+                    synchronized (voiceSegments) {
+                        if ("rpl".equals(pgs)) {
+                            JSONArray rgArr = result.optJSONArray("rg");
+                            int start = (rgArr != null && rgArr.length() >= 2) ? rgArr.optInt(0, 1) : 1;
+                            int end = (rgArr != null && rgArr.length() >= 2) ? rgArr.optInt(1, start) : start;
+                            int s = Math.max(0, start - 1);
+                            int e = Math.min(voiceSegments.size(), end);
+                            if (e > s) voiceSegments.subList(s, e).clear();
+                            voiceSegments.add(Math.min(s, voiceSegments.size()), sb.toString());
+                        } else {
+                            voiceSegments.add(sb.toString());
+                        }
+                    }
                 }
             }
             int status = data.optInt("status", -1);
-            final String full;
-            synchronized (voiceText) { full = voiceText.toString(); }
+            final String full = voiceFullText();
             if (status == 2) {
                 runOnUiThread(() -> {
                     voiceFinalText = full;
@@ -375,6 +387,15 @@ public class MainActivity extends AppCompatActivity {
     private void sendVoicePartial(String text) {
         runOnUiThread(() -> webView.evaluateJavascript(
                 "window.wechatVoicePartial && window.wechatVoicePartial(" + jsonQuote(text) + ");", null));
+    }
+
+    /** 拼接所有识别片段得到完整文字。 */
+    private String voiceFullText() {
+        synchronized (voiceSegments) {
+            StringBuilder sb = new StringBuilder();
+            for (String s : voiceSegments) sb.append(s);
+            return sb.toString();
+        }
     }
 
     private void finishVoice(String text) {
