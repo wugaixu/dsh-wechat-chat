@@ -9,6 +9,9 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "dependencies": {
+    "cloudflared": "^0.7.3"
+  },
   "files": [
     "lib/",
     "README.md",
