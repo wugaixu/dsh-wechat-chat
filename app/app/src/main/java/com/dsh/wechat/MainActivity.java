@@ -229,8 +229,10 @@ public class MainActivity extends AppCompatActivity {
         String signature = Base64.encodeToString(mac.doFinal(signatureOrigin.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
         String authOrigin = "api_key=\"" + IF_API_KEY + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
         String authorization = Base64.encodeToString(authOrigin.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+        // 关键：authorization 是 base64（含 + / =），必须 URL 编码，否则 + 会被解码成空格导致签名校验失败
+        String authEncoded = java.net.URLEncoder.encode(authorization, "UTF-8");
         String dateEncoded = java.net.URLEncoder.encode(date, "UTF-8").replace("+", "%20");
-        return "wss://" + IF_HOST + "/v2/iat?authorization=" + authorization + "&date=" + dateEncoded + "&host=" + IF_HOST;
+        return "wss://" + IF_HOST + "/v2/iat?authorization=" + authEncoded + "&date=" + dateEncoded + "&host=" + IF_HOST;
     }
 
     /** WebSocket 连上后启动录音，持续发音频帧。 */
