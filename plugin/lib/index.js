@@ -20,7 +20,7 @@
  * session on the PC (visible in the official sidebar) via ctx.sessionController
  * — create → prompt → follow → broadcast the final assistant text over SSE.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, copyFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { homedir, networkInterfaces } from 'node:os'
@@ -354,6 +354,24 @@ async function loadCloudflared() {
   return cloudflaredMod
 }
 
+// cloudflared 二进制放到 node_modules 之外运行，避免 pnpm 重装插件时锁文件
+const CLOUDFLARED_BIN = join(home, 'wechat-chat', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')
+
+async function ensureCloudflaredBin(cf) {
+  if (!existsSync(CLOUDFLARED_BIN)) {
+    mkdirSync(dirname(CLOUDFLARED_BIN), { recursive: true })
+    const src = typeof cf.bin === 'string' ? cf.bin : ''
+    if (src !== '' && existsSync(src)) {
+      copyFileSync(src, CLOUDFLARED_BIN)
+    } else {
+      await cf.install(CLOUDFLARED_BIN)
+    }
+  }
+  // 让 cloudflared 包使用数据目录里的二进制
+  if (typeof cf.use === 'function') cf.use(CLOUDFLARED_BIN)
+  return CLOUDFLARED_BIN
+}
+
 class TunnelManager {
   constructor(target) {
     this.target = target
@@ -412,10 +430,7 @@ class TunnelManager {
     this.setPhase('starting')
     try {
       const cf = await loadCloudflared()
-      const bin = cf.bin
-      if (typeof bin !== 'string' || bin === '') throw new Error('cloudflared 包未提供二进制路径')
-      const { existsSync } = await import('node:fs')
-      if (!existsSync(bin)) await cf.install(bin)
+      await ensureCloudflaredBin(cf)
       if (this.stopping || gen !== this.generation) return
       const handle = cf.Tunnel.quick(this.target, { '--no-autoupdate': true, '--protocol': 'http2' })
       this.handle = handle
