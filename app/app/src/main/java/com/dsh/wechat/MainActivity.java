@@ -75,6 +75,8 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean voiceRunning = false;
     private volatile boolean voiceStopRequested = false;
     private volatile boolean voiceCancelled = false;
+    private volatile boolean voiceReleased = false;
+    private String voiceFinalText = null; // 仅 UI 线程访问
     private final StringBuilder voiceText = new StringBuilder();
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
@@ -193,6 +195,8 @@ public class MainActivity extends AppCompatActivity {
         voiceRunning = true;
         voiceStopRequested = false;
         voiceCancelled = false;
+        voiceReleased = false;
+        voiceFinalText = null;
         synchronized (voiceText) { voiceText.setLength(0); }
         try {
             String url = buildIatUrl();
@@ -210,6 +214,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 @Override public void onFailure(WebSocket ws, Throwable t, Response response) {
                     runOnUiThread(() -> {
+                        if (voiceFinalText != null) return; // 服务端已给最终结果，忽略连接关闭
                         cleanupVoice();
                         voiceError("连接讯飞失败：" + (t != null && t.getMessage() != null ? t.getMessage() : "网络不可用"));
                     });
@@ -224,9 +229,14 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** 语音输入结束（松开）。 */
+    /** 语音输入结束（松开）：只有松手才真正发送最终文字。 */
     private void stopVoiceRecognition() {
-        voiceStopRequested = true;
+        voiceReleased = true;
+        if (voiceFinalText != null) {
+            if (voiceRunning) finishVoice(voiceFinalText);
+        } else {
+            voiceStopRequested = true; // 让录音线程发结束帧，等最终结果
+        }
     }
 
     /** 构造鉴权 WebSocket URL（hmac-sha256 签名）。 */
@@ -271,8 +281,14 @@ public class MainActivity extends AppCompatActivity {
                 try { audioRecord.release(); } catch (Exception e) {}
                 audioRecord = null;
                 sendAudioEnd(ws);
-                // 兜底：发完结束帧 5 秒内没结果就强制收尾
-                runOnUiThread(() -> webView.postDelayed(() -> { if (voiceRunning) { cleanupVoice(); voiceError("语音识别超时"); } }, 5000));
+                // 兜底：发完结束帧 5 秒仍无最终结果，用已累计文字收尾
+                runOnUiThread(() -> webView.postDelayed(() -> {
+                    if (voiceRunning && voiceFinalText == null) {
+                        final String t;
+                        synchronized (voiceText) { t = voiceText.toString(); }
+                        finishVoice(t);
+                    }
+                }, 5000));
             });
             recordThread.start();
         } catch (Exception e) {
@@ -344,7 +360,11 @@ public class MainActivity extends AppCompatActivity {
             final String full;
             synchronized (voiceText) { full = voiceText.toString(); }
             if (status == 2) {
-                runOnUiThread(() -> finishVoice(full));
+                runOnUiThread(() -> {
+                    voiceFinalText = full;
+                    voiceStopRequested = true; // 服务端已结束，停止录音
+                    if (voiceReleased && voiceRunning) finishVoice(full);
+                });
             } else if (status == 0 || status == 1) {
                 sendVoicePartial(full);
             }
@@ -358,6 +378,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void finishVoice(String text) {
+        if (!voiceRunning) return; // 已发送过，避免重复
         cleanupVoice();
         if (voiceCancelled) return; // 上滑取消：不发送
         if (text == null || text.trim().isEmpty()) { voiceError("没有识别到内容"); return; }
