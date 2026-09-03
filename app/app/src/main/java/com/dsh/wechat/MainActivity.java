@@ -178,6 +178,11 @@ public class MainActivity extends AppCompatActivity {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REC_AUDIO_REQ);
             return;
         }
+        if (IF_APP_ID == null || IF_APP_ID.isEmpty() || IF_APP_ID.startsWith("your_")
+                || IF_API_KEY.startsWith("your_") || IF_API_SECRET.startsWith("your_")) {
+            voiceError("未配置讯飞语音密钥：请在 app/app/secrets.properties 填入后重新构建（见 docs/iflytek-voice.md）");
+            return;
+        }
         if (voiceRunning) return;
         voiceRunning = true;
         voiceStopRequested = false;

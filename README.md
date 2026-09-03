@@ -142,6 +142,21 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
 **语音输入**：使用讯飞语音听写，密钥需填到 `app/app/secrets.properties`（本地、不提交）；
 申请与配置步骤见 [`docs/iflytek-voice.md`](docs/iflytek-voice.md)。
 
+## 语音识别开通指南（别人 clone 后必看）
+
+> 除语音识别外，插件、安卓壳、扫码配对、聊天等**全部功能 clone 下来就能用**。
+> 只有语音识别需要每个人各自的讯飞免费密钥（不随仓库分发）。
+
+**三步开通：**
+
+1. **注册并创建应用**：打开 <https://console.xfyun.cn/> → 登录 → 创建应用（平台选 Android）。
+2. **开通「语音听写（流式版）」**：在应用里点开通（免费，默认每日 500 次）。
+3. **填密钥**：复制 `app/app/secrets.properties.example` → `app/app/secrets.properties`，填入三个值。
+
+⚠️ **顺序别搞反**：控制台顺序是 `APPID / APISecret / APIKey`（APIKey 是 32 位 hex，APISecret 是 base64），搞反了会报 `401 apikey not found`。
+
+填完重新 `assembleDebug` 即可。完整踩坑记录与错误码见 [`docs/iflytek-voice.md`](docs/iflytek-voice.md)。
+
 ## 已知限制
 
 - 纯文本：手机端只发/收文本；代码块、markdown 以纯文本展示。
