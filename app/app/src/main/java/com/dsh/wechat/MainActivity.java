@@ -9,7 +9,9 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
+import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.util.Base64;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -45,9 +47,12 @@ public class MainActivity extends AppCompatActivity {
     private static final int PICK_AVATAR_REQ = 200;
     private static final int PICK_BG_REQ = 300;
     private static final int VOICE_REQ = 400;
+    private static final int REC_AUDIO_REQ = 500;
     private boolean pendingScan = false;
     private String pendingAvatarSide = "other";
     private String pendingPickKind = "avatar";
+    private SpeechRecognizer speechRecognizer = null;
+    private Intent recognizerIntent = null;
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -140,24 +145,102 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** 唤起系统语音识别对话框（RecognizerIntent）：国产 ROM 上比 SpeechRecognizer 流式接口更稳定。 */
+    /**
+     * 语音输入入口：优先系统识别对话框（有对应 Activity 时）；
+     * 国产 ROM 常只有识别服务、没有对话框，此时回退到流式 SpeechRecognizer。
+     */
     private void startVoiceRecognition() {
-        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话");
-        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-        if (intent.resolveActivity(getPackageManager()) == null) {
-            Toast.makeText(this, "当前设备不支持语音识别", Toast.LENGTH_SHORT).show();
-            webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError('当前设备不支持语音识别');", null);
+        Intent dialog = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        dialog.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        dialog.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
+        dialog.putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话");
+        dialog.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        if (dialog.resolveActivity(getPackageManager()) != null) {
+            try {
+                startActivityForResult(dialog, VOICE_REQ);
+                return;
+            } catch (Exception e) {
+                // 打开失败则继续尝试流式识别
+            }
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            voiceError("当前设备不支持语音识别");
             return;
         }
-        try {
-            startActivityForResult(intent, VOICE_REQ);
-        } catch (Exception e) {
-            Toast.makeText(this, "无法打开语音识别", Toast.LENGTH_SHORT).show();
-            webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError('无法打开语音识别');", null);
+        startStreamingRecognition();
+    }
+
+    /** 流式语音识别（无对话框但有识别服务的设备）。 */
+    private void startStreamingRecognition() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REC_AUDIO_REQ);
+            return;
         }
+        ensureRecognizer();
+        try {
+            speechRecognizer.startListening(recognizerIntent);
+        } catch (Exception e) {
+            voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
+        }
+    }
+
+    private void ensureRecognizer() {
+        if (speechRecognizer == null) {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            speechRecognizer.setRecognitionListener(new RecognitionListener() {
+                @Override public void onResults(Bundle results) {
+                    ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                    final String text = (matches != null && !matches.isEmpty()) ? matches.get(0) : "";
+                    runOnUiThread(() -> {
+                        if (!text.trim().isEmpty()) {
+                            webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
+                        } else {
+                            voiceError("没有识别到内容");
+                        }
+                    });
+                }
+                @Override public void onError(int error) {
+                    final String msg = voiceErrorText(error);
+                    runOnUiThread(() -> voiceError(msg));
+                }
+                @Override public void onReadyForSpeech(Bundle params) {}
+                @Override public void onBeginningOfSpeech() {}
+                @Override public void onRmsChanged(float rmsdB) {}
+                @Override public void onBufferReceived(byte[] buffer) {}
+                @Override public void onEndOfSpeech() {}
+                @Override public void onPartialResults(Bundle partialResults) {}
+                @Override public void onEvent(int eventType, Bundle params) {}
+            });
+        }
+        if (recognizerIntent == null) {
+            recognizerIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
+            recognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+            // 注意：不加 EXTRA_PARTIAL_RESULTS，部分引擎不支持会导致 ERROR_CLIENT
+        }
+    }
+
+    /** 流式识别的错误码 → 中文提示（带错误码，便于定位）。 */
+    private String voiceErrorText(int error) {
+        switch (error) {
+            case SpeechRecognizer.ERROR_AUDIO: return "录音失败（麦克风不可用）";
+            case SpeechRecognizer.ERROR_CLIENT: return "语音识别客户端错误（错误码 " + error + "）";
+            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "没有麦克风权限";
+            case SpeechRecognizer.ERROR_NETWORK: return "网络连接失败";
+            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "网络超时";
+            case SpeechRecognizer.ERROR_NO_MATCH: return "没有识别到内容";
+            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "识别服务忙，请稍后再试";
+            case SpeechRecognizer.ERROR_SERVER: return "识别服务错误（错误码 " + error + "）";
+            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "没有说话";
+            default: return "语音识别失败（错误码 " + error + "）";
+        }
+    }
+
+    /** 语音出错：Toast + 回传页面提示。 */
+    private void voiceError(String msg) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+        webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError(" + jsonQuote(msg) + ");", null);
     }
 
     private void openGallery(String title, int requestCode) {
@@ -190,6 +273,13 @@ public class MainActivity extends AppCompatActivity {
                 Toast.makeText(this, "需要相机权限才能扫码", Toast.LENGTH_LONG).show();
             }
             pendingScan = false;
+        }
+        if (requestCode == REC_AUDIO_REQ) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startStreamingRecognition();
+            } else {
+                voiceError("需要麦克风权限才能语音输入");
+            }
         }
     }
 
@@ -318,5 +408,15 @@ public class MainActivity extends AppCompatActivity {
     public void onBackPressed() {
         if (webView.canGoBack()) webView.goBack();
         else super.onBackPressed();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (speechRecognizer != null) {
+            try { speechRecognizer.cancel(); } catch (Exception e) {}
+            try { speechRecognizer.destroy(); } catch (Exception e) {}
+            speechRecognizer = null;
+        }
+        super.onDestroy();
     }
 }
