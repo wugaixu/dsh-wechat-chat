@@ -66,8 +66,8 @@ public class MainActivity extends AppCompatActivity {
 
     // 讯飞语音听写（WebSocket，系统网络栈）
     private static final String IF_APP_ID = "100a0cb5";
-    private static final String IF_API_KEY = "MTNmY2UyYWY1MzkwMzZhZjFiMWJhYzYy";
-    private static final String IF_API_SECRET = "ccbe233d65d840587c4e00300412f46e";
+    private static final String IF_API_KEY = "ccbe233d65d840587c4e00300412f46e";
+    private static final String IF_API_SECRET = "MTNmY2UyYWY1MzkwMzZhZjFiMWJhYzYy";
     private static final String IF_HOST = "iat-api.xfyun.cn";
     private WebSocket iatWs = null;
     private AudioRecord audioRecord = null;
