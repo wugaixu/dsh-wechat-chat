@@ -46,6 +46,6 @@ dependencies {
     implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
     // 头像/背景裁剪旋转（androidx 原生版，避免旧 support 库冲突）
     implementation 'com.github.yalantis:ucrop:2.2.8-native'
-    // 讯飞语音听写（SparkChain SDK，本地 aar）
-    implementation files('libs/SparkChain.aar')
+    // 讯飞语音听写：直接用 WebSocket + 系统网络栈（OkHttp）
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 }

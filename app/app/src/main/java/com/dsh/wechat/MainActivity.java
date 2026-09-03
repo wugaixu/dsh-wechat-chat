@@ -8,6 +8,9 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
 import android.os.Bundle;
 import android.util.Base64;
 import android.webkit.CookieManager;
@@ -30,18 +33,25 @@ import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
 import com.yalantis.ucrop.UCrop;
 
-import com.iflytek.sparkchain.core.SparkChain;
-import com.iflytek.sparkchain.core.SparkChainConfig;
-import com.iflytek.sparkchain.core.asr.ASR;
-import com.iflytek.sparkchain.core.asr.AsrCallbacks;
-import com.iflytek.sparkchain.core.asr.AudioRecorder;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -53,9 +63,18 @@ public class MainActivity extends AppCompatActivity {
     private boolean pendingScan = false;
     private String pendingAvatarSide = "other";
     private String pendingPickKind = "avatar";
-    private ASR iflyAsr = null;
-    private boolean voiceActive = false;
-    private int iflyInitCode = -1;
+
+    // 讯飞语音听写（WebSocket，系统网络栈）
+    private static final String IF_APP_ID = "100a0cb5";
+    private static final String IF_API_KEY = "MTNmY2UyYWY1MzkwMzZhZjFiMWJhYzYy";
+    private static final String IF_API_SECRET = "ccbe233d65d840587c4e00300412f46e";
+    private static final String IF_HOST = "iat-api.xfyun.cn";
+    private WebSocket iatWs = null;
+    private AudioRecord audioRecord = null;
+    private Thread recordThread = null;
+    private volatile boolean voiceRunning = false;
+    private volatile boolean voiceStopRequested = false;
+    private final StringBuilder voiceText = new StringBuilder();
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -100,7 +119,6 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient());
         webView.addJavascriptInterface(new Bridge(), "WechatBridge");
         CookieManager.getInstance().setAcceptCookie(true);
-        initIflytek();
 
         String origin = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", null);
         if (origin == null || origin.isEmpty()) {
@@ -144,98 +162,197 @@ public class MainActivity extends AppCompatActivity {
         }
 
         @JavascriptInterface
-        public void launchVoice() {
+        public void startVoice() {
             runOnUiThread(() -> startVoiceRecognition());
         }
-    }
 
-    /** 初始化讯飞 SparkChain（全局一次）。 */
-    private void initIflytek() {
-        try {
-            SparkChainConfig config = SparkChainConfig.builder()
-                    .appID("100a0cb5")
-                    .apiKey("MTNmY2UyYWY1MzkwMzZhZjFiMWJhYzYy")
-                    .apiSecret("ccbe233d65d840587c4e00300412f46e")
-                    .workDir(getFilesDir().getAbsolutePath())
-                    .logLevel(100); // 关闭日志
-            iflyInitCode = SparkChain.getInst().init(getApplicationContext(), config);
-            if (iflyInitCode != 0) {
-                android.util.Log.w("wechat-chat", "SparkChain init failed: " + iflyInitCode);
-            }
-        } catch (Throwable t) {
-            iflyInitCode = -998;
-            android.util.Log.w("wechat-chat", "SparkChain init error: " + t);
+        @JavascriptInterface
+        public void stopVoice() {
+            runOnUiThread(() -> stopVoiceRecognition());
         }
     }
 
-    /** 语音输入入口：讯飞语音听写（SparkChain ASR）。 */
+    /** 语音输入开始（按住说话）。 */
     private void startVoiceRecognition() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REC_AUDIO_REQ);
             return;
         }
-        if (voiceActive) { voiceError("正在识别中，请稍候"); return; }
-        if (iflyInitCode != 0) {
-            voiceError("讯飞 SDK 初始化失败（" + iflyInitCode + "）");
-            return;
-        }
+        if (voiceRunning) return;
+        voiceRunning = true;
+        voiceStopRequested = false;
+        synchronized (voiceText) { voiceText.setLength(0); }
         try {
-            stopIflyVoice();
-            final ASR asr = new ASR("zh_cn", "iat", "mandarin");
-            iflyAsr = asr;
-            asr.registerCallbacks(new AsrCallbacks() {
-                @Override public void onResult(ASR.ASRResult result, Object usrTag) {
-                    if (result.getStatus() == 2) { // 2=最终结果
-                        final String text = result.getBestMatchText();
-                        runOnUiThread(() -> finishIflyVoice(text));
-                    }
+            String url = buildIatUrl();
+            OkHttpClient client = new OkHttpClient.Builder()
+                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .build();
+            Request req = new Request.Builder().url(url).build();
+            iatWs = client.newWebSocket(req, new WebSocketListener() {
+                @Override public void onOpen(WebSocket ws, Response response) {
+                    startRecording(ws);
                 }
-                @Override public void onError(ASR.ASRError error, Object usrTag) {
-                    final String msg = "语音识别失败(" + error.getCode() + ")：" + (error.getErrMsg() == null ? "" : error.getErrMsg());
-                    runOnUiThread(() -> { stopIflyVoice(); voiceError(msg); });
+                @Override public void onMessage(WebSocket ws, String text) {
+                    handleIatMessage(text);
                 }
-                @Override public void onEndOfSpeech() {
-                    runOnUiThread(() -> stopIflyVoice());
+                @Override public void onFailure(WebSocket ws, Throwable t, Response response) {
+                    runOnUiThread(() -> {
+                        cleanupVoice();
+                        voiceError("连接讯飞失败：" + (t != null && t.getMessage() != null ? t.getMessage() : "网络不可用"));
+                    });
                 }
+                @Override public void onClosed(WebSocket ws, int code, String reason) {}
             });
-            int ret = asr.start("wechat");
-            if (ret != 0) {
-                iflyAsr = null;
-                voiceError("语音识别启动失败（" + ret + "）");
+            // 最长按住 60 秒自动松手
+            webView.postDelayed(() -> { if (voiceRunning) stopVoiceRecognition(); }, 60000);
+        } catch (Exception e) {
+            voiceRunning = false;
+            voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
+        }
+    }
+
+    /** 语音输入结束（松开）。 */
+    private void stopVoiceRecognition() {
+        voiceStopRequested = true;
+    }
+
+    /** 构造鉴权 WebSocket URL（hmac-sha256 签名）。 */
+    private String buildIatUrl() throws Exception {
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US);
+        sdf.setTimeZone(java.util.TimeZone.getTimeZone("GMT"));
+        String date = sdf.format(new java.util.Date());
+        String requestLine = "GET /v2/iat HTTP/1.1";
+        String signatureOrigin = "host: " + IF_HOST + "\ndate: " + date + "\n" + requestLine;
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(IF_API_SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        String signature = Base64.encodeToString(mac.doFinal(signatureOrigin.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
+        String authOrigin = "api_key=\"" + IF_API_KEY + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+        String authorization = Base64.encodeToString(authOrigin.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+        String dateEncoded = java.net.URLEncoder.encode(date, "UTF-8").replace("+", "%20");
+        return "wss://" + IF_HOST + "/v2/iat?authorization=" + authorization + "&date=" + dateEncoded + "&host=" + IF_HOST;
+    }
+
+    /** WebSocket 连上后启动录音，持续发音频帧。 */
+    private void startRecording(final WebSocket ws) {
+        try {
+            final int sampleRate = 16000;
+            int minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(minBuf, 1280 * 4));
+            audioRecord.startRecording();
+            recordThread = new Thread(() -> {
+                byte[] buf = new byte[1280];
+                boolean first = true;
+                try {
+                    while (voiceRunning && !voiceStopRequested) {
+                        int read = audioRecord.read(buf, 0, 1280);
+                        if (read > 0) {
+                            byte[] chunk = (read == 1280) ? buf : Arrays.copyOf(buf, read);
+                            sendAudio(ws, chunk, first ? 0 : 1);
+                            first = false;
+                        }
+                    }
+                } catch (Exception ignored) {}
+                try { audioRecord.stop(); } catch (Exception e) {}
+                try { audioRecord.release(); } catch (Exception e) {}
+                audioRecord = null;
+                sendAudioEnd(ws);
+                // 兜底：发完结束帧 5 秒内没结果就强制收尾
+                runOnUiThread(() -> webView.postDelayed(() -> { if (voiceRunning) { cleanupVoice(); voiceError("语音识别超时"); } }, 5000));
+            });
+            recordThread.start();
+        } catch (Exception e) {
+            runOnUiThread(() -> {
+                cleanupVoice();
+                voiceError("录音启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
+            });
+        }
+    }
+
+    private void sendAudio(WebSocket ws, byte[] pcm, int status) {
+        try {
+            JSONObject data = new JSONObject();
+            data.put("status", status);
+            data.put("format", "audio/L16;rate=16000");
+            data.put("encoding", "raw");
+            data.put("audio", Base64.encodeToString(pcm, Base64.NO_WRAP));
+            JSONObject frame = new JSONObject();
+            if (status == 0) {
+                frame.put("common", new JSONObject().put("app_id", IF_APP_ID));
+                frame.put("business", new JSONObject()
+                        .put("language", "zh_cn")
+                        .put("domain", "iat")
+                        .put("accent", "mandarin")
+                        .put("ptt", 1));
+            }
+            frame.put("data", data);
+            ws.send(frame.toString());
+        } catch (Exception ignored) {}
+    }
+
+    private void sendAudioEnd(WebSocket ws) {
+        try {
+            JSONObject frame = new JSONObject();
+            frame.put("data", new JSONObject().put("status", 2));
+            ws.send(frame.toString());
+        } catch (Exception ignored) {}
+    }
+
+    /** 解析识别结果：累计 ws[].cw[].w，status==2 时收尾。 */
+    private void handleIatMessage(String text) {
+        try {
+            JSONObject obj = new JSONObject(text);
+            int code = obj.optInt("code", 0);
+            if (code != 0) {
+                final String msg = "识别失败(" + code + ")：" + obj.optString("message", "");
+                runOnUiThread(() -> { cleanupVoice(); voiceError(msg); });
                 return;
             }
-            final AudioRecorder recorder = AudioRecorder.getInstance();
-            recorder.registerCallBack(new AudioRecorder.AudioDataCallback() {
-                @Override public void onAudioData(byte[] data, int size) {
-                    if (iflyAsr != null && size > 0 && size <= data.length) {
-                        try { iflyAsr.write(Arrays.copyOf(data, size)); } catch (Throwable ignored) {}
+            JSONObject data = obj.optJSONObject("data");
+            if (data == null) return;
+            JSONObject result = data.optJSONObject("result");
+            if (result != null) {
+                JSONArray wsArr = result.optJSONArray("ws");
+                if (wsArr != null) {
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < wsArr.length(); i++) {
+                        JSONArray cwArr = wsArr.optJSONObject(i).optJSONArray("cw");
+                        if (cwArr == null) continue;
+                        for (int j = 0; j < cwArr.length(); j++) {
+                            String w = cwArr.optJSONObject(j).optString("w", "");
+                            if (w != null) sb.append(w);
+                        }
                     }
+                    synchronized (voiceText) { voiceText.append(sb.toString()); }
                 }
-                @Override public void onAudioVolume(double volume, int size) {}
-            });
-            recorder.startRecord();
-            voiceActive = true;
-            // 兜底：15 秒无结果自动收尾
-            webView.postDelayed(() -> { if (voiceActive) stopIflyVoice(); }, 15000);
-        } catch (Throwable t) {
-            voiceError("语音识别启动失败：" + (t.getMessage() == null ? "未知错误" : t.getMessage()));
-        }
+            }
+            int status = data.optInt("status", -1);
+            if (status == 2) {
+                final String full;
+                synchronized (voiceText) { full = voiceText.toString(); }
+                runOnUiThread(() -> finishVoice(full));
+            }
+        } catch (Exception ignored) {}
     }
 
-    private void stopIflyVoice() {
-        voiceActive = false;
-        try { AudioRecorder.getInstance().stopRecord(); } catch (Throwable ignored) {}
-        final ASR a = iflyAsr;
-        iflyAsr = null;
-        if (a != null) {
-            try { a.stop(false); } catch (Throwable ignored) {}
-        }
-    }
-
-    private void finishIflyVoice(String text) {
-        stopIflyVoice();
+    private void finishVoice(String text) {
+        cleanupVoice();
         if (text == null || text.trim().isEmpty()) { voiceError("没有识别到内容"); return; }
         webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
+    }
+
+    private void cleanupVoice() {
+        voiceRunning = false;
+        voiceStopRequested = true;
+        if (audioRecord != null) {
+            try { audioRecord.stop(); } catch (Exception e) {}
+            try { audioRecord.release(); } catch (Exception e) {}
+            audioRecord = null;
+        }
+        if (iatWs != null) {
+            try { iatWs.close(1000, "done"); } catch (Exception e) {}
+            iatWs = null;
+        }
     }
 
     /** 语音出错：Toast + 回传页面提示。 */
@@ -395,8 +512,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        stopIflyVoice();
-        try { SparkChain.getInst().unInit(); } catch (Throwable ignored) {}
+        cleanupVoice();
         super.onDestroy();
     }
 }

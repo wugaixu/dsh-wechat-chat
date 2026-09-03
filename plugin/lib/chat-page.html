@@ -243,7 +243,7 @@
       </svg>
     </button>
     <textarea class="field" id="input" rows="1" placeholder="输入消息…"></textarea>
-    <button class="holdtalk" id="holdTalk">点击 说话</button>
+    <button class="holdtalk" id="holdTalk">按住 说话</button>
     <button class="send" id="sendBtn" disabled>发送</button>
   </footer>
 
@@ -843,14 +843,20 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
   }
   voiceBtn.addEventListener('click', function () { setVoiceMode(!voiceMode); });
 
-  holdTalk.addEventListener('click', function () {
-    try {
-      if (window.WechatBridge && typeof window.WechatBridge.launchVoice === 'function') {
-        window.WechatBridge.launchVoice();
-        return;
-      }
-    } catch (err) {}
-    toastText('当前环境不支持语音输入');
+  holdTalk.addEventListener('touchstart', function (e) {
+    e.preventDefault();
+    holdTalk.classList.add('recording');
+    try { if (window.WechatBridge && window.WechatBridge.startVoice) window.WechatBridge.startVoice(); }
+    catch (err) { toastText('当前环境不支持语音输入'); }
+  });
+  holdTalk.addEventListener('touchend', function (e) {
+    e.preventDefault();
+    holdTalk.classList.remove('recording');
+    try { if (window.WechatBridge && window.WechatBridge.stopVoice) window.WechatBridge.stopVoice(); } catch (err) {}
+  });
+  holdTalk.addEventListener('touchcancel', function () {
+    holdTalk.classList.remove('recording');
+    try { if (window.WechatBridge && window.WechatBridge.stopVoice) window.WechatBridge.stopVoice(); } catch (err) {}
   });
 
   /* 语音识别结果回来：转成文字直接发送 */
