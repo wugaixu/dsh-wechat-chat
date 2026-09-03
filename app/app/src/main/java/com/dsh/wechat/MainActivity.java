@@ -74,6 +74,7 @@ public class MainActivity extends AppCompatActivity {
     private Thread recordThread = null;
     private volatile boolean voiceRunning = false;
     private volatile boolean voiceStopRequested = false;
+    private volatile boolean voiceCancelled = false;
     private final StringBuilder voiceText = new StringBuilder();
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
@@ -170,6 +171,11 @@ public class MainActivity extends AppCompatActivity {
         public void stopVoice() {
             runOnUiThread(() -> stopVoiceRecognition());
         }
+
+        @JavascriptInterface
+        public void cancelVoice() {
+            runOnUiThread(() -> cancelVoiceRecognition());
+        }
     }
 
     /** 语音输入开始（按住说话）。 */
@@ -186,6 +192,7 @@ public class MainActivity extends AppCompatActivity {
         if (voiceRunning) return;
         voiceRunning = true;
         voiceStopRequested = false;
+        voiceCancelled = false;
         synchronized (voiceText) { voiceText.setLength(0); }
         try {
             String url = buildIatUrl();
@@ -334,18 +341,33 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
             int status = data.optInt("status", -1);
+            final String full;
+            synchronized (voiceText) { full = voiceText.toString(); }
             if (status == 2) {
-                final String full;
-                synchronized (voiceText) { full = voiceText.toString(); }
                 runOnUiThread(() -> finishVoice(full));
+            } else if (status == 0 || status == 1) {
+                sendVoicePartial(full);
             }
         } catch (Exception ignored) {}
     }
 
+    /** 实时识别中间结果回传页面（用于显示正在识别的文字）。 */
+    private void sendVoicePartial(String text) {
+        runOnUiThread(() -> webView.evaluateJavascript(
+                "window.wechatVoicePartial && window.wechatVoicePartial(" + jsonQuote(text) + ");", null));
+    }
+
     private void finishVoice(String text) {
         cleanupVoice();
+        if (voiceCancelled) return; // 上滑取消：不发送
         if (text == null || text.trim().isEmpty()) { voiceError("没有识别到内容"); return; }
         webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
+    }
+
+    /** 上滑取消：终止识别且不发送。 */
+    private void cancelVoiceRecognition() {
+        voiceCancelled = true;
+        cleanupVoice();
     }
 
     private void cleanupVoice() {

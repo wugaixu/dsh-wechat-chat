@@ -47,6 +47,7 @@ const home = process.env.DSH_HOME || join(homedir(), '.dsh')
 const DEVICES_FILE = join(home, 'whale-devices.json')
 const SESSION_MAP_FILE = join(home, 'wechat-chat-devices.json')
 const AVATAR_DIR = join(home, 'wechat-chat', 'avatars')
+const CREDENTIALS_FILE = join(home, '.credentials.yaml')
 
 const PAGE = readFileSync(fileURLToPath(new URL('./chat-page.html', import.meta.url)), 'utf8')
 const PANEL = readFileSync(fileURLToPath(new URL('./panel-page.html', import.meta.url)), 'utf8')
@@ -532,6 +533,40 @@ function persistNickname(name) {
   }
 }
 
+/* ── DeepSeek 余额 ──────────────────────────────────────────────────────── */
+
+/** 从 $DSH_HOME/.credentials.yaml 读取 DEEPSEEK_API_KEY（简单正则，避免引入 yaml 依赖）。 */
+function readDeepSeekKey() {
+  try {
+    const txt = readFileSync(CREDENTIALS_FILE, 'utf8')
+    const m = /DEEPSEEK_API_KEY:\s*([^\s]+)/.exec(txt)
+    return m ? m[1].trim() : ''
+  } catch { return '' }
+}
+
+let balanceCache = { at: 0, value: null }
+/** 拉取 DeepSeek 开放平台余额，60 秒缓存。 */
+async function fetchDeepSeekBalance() {
+  const now = Date.now()
+  if (balanceCache.value !== null && now - balanceCache.at < 60 * 1000) return balanceCache.value
+  const key = readDeepSeekKey()
+  if (!key) return null
+  try {
+    const resp = await fetch('https://api.deepseek.com/user/balance', {
+      headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
+    })
+    if (!resp.ok) return null
+    const data = await resp.json()
+    const infos = data && data.balance_infos
+    if (Array.isArray(infos) && infos.length > 0) {
+      const value = { currency: infos[0].currency || 'CNY', balance: String(infos[0].total_balance ?? '0') }
+      balanceCache = { at: now, value }
+      return value
+    }
+    return null
+  } catch { return null }
+}
+
 /* ── plugin ───────────────────────────────────────────────────────────── */
 
 export function apply(ctx, config = {}) {
@@ -969,6 +1004,24 @@ export function apply(ctx, config = {}) {
       } catch (err) {
         writeJson(res, 500, { ok: false, error: (err && err.message) || '保存失败' })
       }
+      return
+    }
+
+    if (pathname === '/api/wechat/background/delete') {
+      if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
+      for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
+        const f = join(AVATAR_DIR, `background.${ext}`)
+        try { if (existsSync(f)) unlinkSync(f) } catch { /* ignore */ }
+      }
+      writeJson(res, 200, { ok: true })
+      return
+    }
+
+    if (pathname === '/api/wechat/balance') {
+      if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
+      const b = await fetchDeepSeekBalance()
+      if (b) writeJson(res, 200, { ok: true, balance: b.balance, currency: b.currency })
+      else writeJson(res, 200, { ok: false })
       return
     }
 
