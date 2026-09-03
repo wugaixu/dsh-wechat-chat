@@ -1,0 +1,895 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ededed">
+<title>鲸聊</title>
+<style>
+  :root {
+    --green: #07c160;
+    --green-dark: #06ad56;
+    --bubble-me: #95ec69;
+    --bubble-other: #ffffff;
+    --bg: #ededed;
+    --bar: #f7f7f7;
+    --ink: #191919;
+    --ink-2: #8a8a8a;
+    --line: rgba(0, 0, 0, 0.08);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    overflow: hidden;
+    user-select: none;
+  }
+
+  /* ── 顶部栏 ─────────────────────────────── */
+  .topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    height: calc(48px + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+    background: var(--bar);
+    border-bottom: 0.5px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .topbar .title {
+    font-size: 17px; font-weight: 600; color: var(--ink);
+    max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .topbar .scan {
+    position: absolute; right: 8px;
+    top: calc(env(safe-area-inset-top) + 4px);
+    width: 40px; height: 40px; border: none; background: transparent;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .topbar .scan svg { width: 22px; height: 22px; color: var(--ink); }
+
+  /* ── 消息区 ─────────────────────────────── */
+  .msgs {
+    position: fixed; top: calc(48px + env(safe-area-inset-top));
+    bottom: calc(56px + env(safe-area-inset-bottom));
+    left: 0; right: 0; overflow-y: auto; padding: 12px 12px 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .row { display: flex; margin-bottom: 14px; align-items: flex-start; }
+  .row.me { flex-direction: row-reverse; }
+  .avatar {
+    width: 40px; height: 40px; border-radius: 6px; flex: none;
+    background: #d9d9d9 center/cover no-repeat;
+  }
+  .bubble {
+    position: relative; max-width: 72%;
+    margin: 0 10px;
+    padding: 9px 12px;
+    font-size: 15px; line-height: 1.45;
+    word-break: break-word; white-space: pre-wrap;
+    border-radius: 8px;
+  }
+  .row.other .bubble { background: var(--bubble-other); }
+  .row.me .bubble { background: var(--bubble-me); }
+  .row.other .bubble::before, .row.me .bubble::before {
+    content: ""; position: absolute; top: 14px; width: 10px; height: 10px;
+    transform: rotate(45deg); z-index: -1;
+  }
+  .row.other .bubble::before { left: -4px; background: var(--bubble-other); }
+  .row.me .bubble::before { right: -4px; background: var(--bubble-me); }
+  .status .bubble {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--ink-2); font-size: 14px; background: var(--bubble-other);
+  }
+  .dots { display: inline-flex; gap: 4px; align-items: center; }
+  .dots i {
+    width: 6px; height: 6px; border-radius: 50%; background: #b8b8b8;
+    animation: bounce 1.2s infinite;
+  }
+  .dots i:nth-child(2) { animation-delay: .2s; }
+  .dots i:nth-child(3) { animation-delay: .4s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-5px); opacity: 1; } }
+
+  .toast {
+    position: fixed; top: calc(56px + env(safe-area-inset-top)); left: 50%;
+    transform: translateX(-50%); z-index: 30;
+    background: rgba(0,0,0,.72); color: #fff; font-size: 13px;
+    padding: 7px 14px; border-radius: 6px; opacity: 0;
+    transition: opacity .25s; pointer-events: none; max-width: 80%;
+  }
+  .toast.show { opacity: 1; }
+
+  /* ── 头像菜单（底部弹层） ───────────────── */
+  .avatar-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 60; display: none; }
+  .avatar-mask.show { display: block; }
+  .avatar-menu { position: fixed; left: 0; right: 0; bottom: 0; background: #fff;
+    border-radius: 14px 14px 0 0; z-index: 61; display: none; padding: 8px 0; }
+  .avatar-menu.show { display: block; }
+  .avatar-menu .item { height: 52px; line-height: 52px; text-align: center; font-size: 16px;
+    color: #191919; cursor: pointer; }
+  .avatar-menu .item.cancel { border-top: 6px solid #f2f2f2; color: #8a8a8a; }
+  .avatar { cursor: pointer; }
+
+  /* ── 修改昵称弹层 ─────────────────────── */
+  .nick-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 70; display: none; }
+  .nick-mask.show { display: block; }
+  .nick-dialog { position: fixed; left: 28px; right: 28px; top: 28%; background: #fff; border-radius: 12px;
+    z-index: 71; padding: 18px 16px; display: none; }
+  .nick-dialog.show { display: block; }
+  .nick-title { font-size: 16px; font-weight: 600; text-align: center; margin-bottom: 14px; }
+  .nick-dialog input { width: 100%; height: 42px; border: 1px solid #e5e5e5; border-radius: 8px;
+    font-size: 16px; padding: 0 12px; outline: none; box-sizing: border-box; }
+  .nick-btns { display: flex; gap: 10px; margin-top: 14px; }
+  .nick-btns button { flex: 1; height: 40px; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; }
+  .nick-btns .cancel { background: #f2f2f2; color: #191919; }
+  .nick-btns .ok { background: #07c160; color: #fff; }
+  .topbar .title { cursor: pointer; }
+
+  /* ── 多选删除 ───────────────────────────── */
+  .select-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 50; height: calc(48px + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top); background: var(--bar); border-bottom: 0.5px solid var(--line);
+    display: none; align-items: center; padding-left: 12px; padding-right: 12px; gap: 16px; }
+  .select-bar.show { display: flex; }
+  .select-bar button { border: none; background: transparent; font-size: 15px; color: #191919; cursor: pointer; padding: 4px; }
+  .select-bar .danger { color: #d0392b; }
+  .select-bar .title { flex: 1; text-align: center; font-size: 15px; color: #191919; }
+  .check { width: 22px; height: 22px; min-width: 22px; border-radius: 50%; border: 1.5px solid #c0c0c0;
+    align-self: center; margin: 0 8px 0 0; display: flex; align-items: center; justify-content: center; }
+  .row.selected .check { background: #07c160; border-color: #07c160; }
+  .row.selected .check::after { content: ""; width: 10px; height: 5px; border-left: 2px solid #fff;
+    border-bottom: 2px solid #fff; transform: rotate(-45deg) translateY(-1px); }
+  .row.selected { background: rgba(7, 193, 96, 0.08); border-radius: 8px; }
+
+  /* ── 底部输入条 ─────────────────────────── */
+  .inputbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: var(--bar); border-top: 0.5px solid var(--line);
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    display: flex; align-items: flex-end; gap: 8px;
+  }
+  .inputbar .voice-btn {
+    width: 38px; height: 40px; flex: none; border: none; background: transparent;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+  }
+  .inputbar .voice-btn svg { width: 26px; height: 26px; color: #191919; }
+  .inputbar .field {
+    flex: 1; min-height: 40px; max-height: 120px; border: none; outline: none;
+    background: #f2f2f2; border-radius: 8px; font-size: 16px; line-height: 22px;
+    padding: 9px 12px; color: var(--ink); user-select: text; -webkit-user-select: text;
+    resize: none; overflow-y: auto; font-family: inherit;
+  }
+  .inputbar .send {
+    height: 40px; min-width: 68px; border: none; border-radius: 8px;
+    background: var(--green); color: #fff; font-size: 16px; font-weight: 500;
+    cursor: pointer; padding: 0 14px; flex: none;
+  }
+  .inputbar .send:disabled { background: #d0d0d0; }
+  /* 语音面板：点击唤起系统语音识别 */
+  .inputbar .holdtalk {
+    flex: 1; height: 40px; border: none; border-radius: 8px; background: #f2f2f2;
+    color: #191919; font-size: 16px; display: none; align-items: center; justify-content: center;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  .inputbar .holdtalk.show { display: flex; }
+  .inputbar .holdtalk.recording { background: #dcdcdc; color: #555; }
+
+  /* ── 未配对引导页（默认可见，不依赖 JS，杜绝白屏） ── */
+  .guide { position: fixed; inset: 0; background: var(--bg); display: flex;
+    flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; z-index: 40; }
+  .guide.hidden { display: none; }
+  .guide .logo { width: 84px; height: 84px; border-radius: 20px; background: var(--green);
+    display: flex; align-items: center; justify-content: center; }
+  .guide .logo svg { width: 46px; height: 46px; color: #fff; }
+  .guide h1 { font-size: 19px; font-weight: 600; }
+  .guide p { font-size: 14px; color: var(--ink-2); text-align: center; line-height: 1.6; }
+  .guide .btn {
+    width: 220px; height: 46px; border: none; border-radius: 10px;
+    background: var(--green); color: #fff; font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  .guide .btn:active { background: var(--green-dark); }
+  .guide .divider { display: flex; align-items: center; gap: 10px; width: 260px; color: var(--ink-2); font-size: 12px; }
+  .guide .divider::before, .guide .divider::after { content: ""; flex: 1; height: 0.5px; background: var(--line); }
+  .guide .paste { display: flex; gap: 8px; width: 260px; }
+  .guide .paste input { flex: 1; height: 40px; border: none; outline: none; background: #fff;
+    border-radius: 8px; font-size: 14px; padding: 0 10px; color: var(--ink); user-select: text; -webkit-user-select: text; }
+  .guide .paste button { height: 40px; padding: 0 14px; border: none; border-radius: 8px;
+    background: var(--green); color: #fff; font-size: 14px; cursor: pointer; }
+  .guide .hint { font-size: 12px; color: #b0b0b0; }
+</style>
+</head>
+<body>
+
+  <header class="topbar" id="topbar" style="display:none">
+    <button class="scan" id="scanBtn" aria-label="扫码连接" title="扫码连接">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+        <rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3zM21 14v.01M17 21h.01M21 21h.01"/>
+      </svg>
+    </button>
+    <span class="title" id="titleText">鲸聊助手</span>
+  </header>
+
+  <header class="select-bar" id="selectBar">
+    <button id="selectCancelBtn">取消</button>
+    <span class="title" id="selectCount">已选 0 条</span>
+    <button id="selectAllBtn">全选</button>
+    <button class="danger" id="deleteBtn">删除</button>
+  </header>
+
+  <main class="msgs" id="msgs"></main>
+
+  <footer class="inputbar" id="inputbar" style="display:none">
+    <button class="voice-btn" id="voiceBtn" aria-label="语音输入" title="语音输入">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/>
+      </svg>
+    </button>
+    <textarea class="field" id="input" rows="1" placeholder="输入消息…"></textarea>
+    <button class="holdtalk" id="holdTalk">点击 说话</button>
+    <button class="send" id="sendBtn" disabled>发送</button>
+  </footer>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="avatar-mask" id="avatarMask"></div>
+  <div class="avatar-menu" id="avatarMenu">
+    <div class="item" id="avatarChangeItem">修改头像</div>
+    <div class="item" id="backgroundChangeItem">修改背景</div>
+    <div class="item cancel" id="avatarCancelItem">取消</div>
+  </div>
+
+  <div class="nick-mask" id="nickMask"></div>
+  <div class="nick-dialog" id="nickDialog">
+    <div class="nick-title">修改聊天对象名</div>
+    <input id="nickInput" type="text" maxlength="30" placeholder="请输入名称">
+    <div class="nick-btns">
+      <button class="cancel" id="nickCancelBtn">取消</button>
+      <button class="ok" id="nickOkBtn">确定</button>
+    </div>
+  </div>
+
+  <section class="guide" id="guide">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+      </svg>
+    </div>
+    <h1>连接电脑上的鲸聊</h1>
+    <p>先扫码配对电脑，配对后即可像微信一样<br>给电脑上的智能体发消息</p>
+    <button class="btn" id="guideScanBtn">扫一扫连接</button>
+    <div class="divider">或粘贴配对链接</div>
+    <div class="paste">
+      <input id="pasteInput" type="text" placeholder="http://…/wechat?pair=…">
+      <button id="pasteBtn">连接</button>
+    </div>
+    <p class="hint">电脑端：打开「鲸聊 · 配对」面板生成二维码</p>
+  </section>
+
+<script>
+window.__WECHAT_DEVICE__ = __WECHAT_DEVICE_VALUE__;
+window.__WECHAT_PAIR_ERR__ = __WECHAT_PAIR_ERR_VALUE__;
+window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
+(function () {
+  'use strict';
+
+  // 元素引用先声明：下面初始化逻辑会立即调用 showChat/showGuide，不能引用未赋值的变量
+  var cfg = { nickname: 'DSH助手', avatarOther: '', avatarMe: '' };
+  var msgs = document.getElementById('msgs');
+  var input = document.getElementById('input');
+  var sendBtn = document.getElementById('sendBtn');
+  var voiceBtn = document.getElementById('voiceBtn');
+  var holdTalk = document.getElementById('holdTalk');
+  var toast = document.getElementById('toast');
+  var guide = document.getElementById('guide');
+  var avatarMask = document.getElementById('avatarMask');
+  var avatarMenu = document.getElementById('avatarMenu');
+  var avatarMenuSide = 'other';
+  var titleText = document.getElementById('titleText');
+  var nickMask = document.getElementById('nickMask');
+  var nickDialog = document.getElementById('nickDialog');
+  var nickInput = document.getElementById('nickInput');
+  var statusRow = null;
+  var busy = false;
+  var knownIds = {};
+  var lastSeq = 0;
+  var pollTimer = null;
+  var seenMsgIds = {};
+  var hiddenSet = {};
+  var selectMode = false;
+  var selectedIds = {};
+  var chatShown = false;
+  var selectBar = document.getElementById('selectBar');
+  var selectCount = document.getElementById('selectCount');
+  var deleteBtn = document.getElementById('deleteBtn');
+
+  var qs = new URLSearchParams(location.search);
+  var deviceId = (window.__WECHAT_DEVICE__) || qs.get('device') || (function () {
+    try { return sessionStorage.getItem('dsh-remote-device') || localStorage.getItem('dsh-remote-device'); } catch (e) { return null; }
+  })();
+  // 稳定客户端标识：App 注入优先，其次本地持久化；用于跨扫码/换公网地址保留同一会话
+  var clientId = (window.__WECHAT_CLIENT__) || qs.get('client') || (function () {
+    try { return localStorage.getItem('dsh-wechat-client'); } catch (e) { return null; }
+  })() || (function () {
+    var id = (Math.random() + 1).toString(36).slice(2) + Date.now().toString(36);
+    try { localStorage.setItem('dsh-wechat-client', id); } catch (e) {}
+    return id;
+  })();
+  try { localStorage.setItem('dsh-wechat-client', clientId); } catch (e) {}
+  // 落库 deviceId，并清掉地址栏里的配对参数
+  if (deviceId) {
+    try {
+      sessionStorage.setItem('dsh-remote-device', deviceId);
+      localStorage.setItem('dsh-remote-device', deviceId);
+    } catch (e) {}
+  }
+  if (qs.get('pair') || qs.get('device') || qs.get('client')) {
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  }
+  // 配对失败提示（服务器直接下发到页面）
+  if (window.__WECHAT_PAIR_ERR__) {
+    setTimeout(function () { toastText('配对失败：请刷新电脑上的二维码后重扫'); }, 250);
+  }
+  // 有设备凭据就先显示聊天骨架，不依赖网络请求才渲染
+  if (deviceId) showChat();
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toastText(t) {
+    toast.textContent = t; toast.classList.add('show');
+    clearTimeout(toastText._t);
+    toastText._t = setTimeout(function () { toast.classList.remove('show'); }, 2600);
+  }
+  function scrollBottom() { msgs.scrollTop = msgs.scrollHeight; }
+
+  function addRow(kind, text, avatarSrc, id) {
+    var row = document.createElement('div');
+    row.className = 'row ' + (kind === 'me' ? 'me' : 'other');
+    if (id) row.dataset.id = id;
+    var av = document.createElement('div');
+    av.className = 'avatar';
+    if (avatarSrc) av.style.backgroundImage = 'url("' + avatarSrc + '")';
+    av.addEventListener('click', function () {
+      if (selectMode) { toggleSelect(row); return; }
+      showAvatarMenu(kind === 'me' ? 'me' : 'other');
+    });
+    var bub = document.createElement('div');
+    bub.className = 'bubble';
+    bub.textContent = text;
+    row.appendChild(av); row.appendChild(bub);
+    row.addEventListener('click', function () { if (selectMode) toggleSelect(row); });
+    attachLongPress(row);
+    msgs.appendChild(row);
+    scrollBottom();
+    return row;
+  }
+
+  /* 长文本拆分：在句末/换行等合理位置断开，连续成多条 */
+  function splitLongText(text) {
+    var limit = 200;
+    if (text.length <= limit) return [text];
+    var chunks = [];
+    var rest = text;
+    var breakers = ['\n', '。', '！', '？', '；', '.', '!', '?', ';'];
+    while (rest.length > limit) {
+      var head = rest.slice(0, limit);
+      var cut = -1;
+      for (var i = 0; i < breakers.length; i++) {
+        var p = head.lastIndexOf(breakers[i]);
+        if (p > cut) cut = p;
+      }
+      if (cut < limit * 0.5) cut = limit; else cut += 1;
+      chunks.push(rest.slice(0, cut));
+      rest = rest.slice(cut);
+    }
+    if (rest.length > 0) chunks.push(rest);
+    return chunks;
+  }
+
+  function addAssistant(text, id) {
+    var parts = splitLongText(text);
+    for (var i = 0; i < parts.length; i++) {
+      addRow('other', parts[i], cfg.avatarOther, id);
+    }
+  }
+
+  function setStatus(text) {
+    removeStatus();
+    if (text === null || text === undefined || text === '') return;
+    statusRow = document.createElement('div');
+    statusRow.className = 'row other status';
+    var av = document.createElement('div');
+    av.className = 'avatar';
+    if (cfg.avatarOther) av.style.backgroundImage = 'url("' + cfg.avatarOther + '")';
+    av.addEventListener('click', function () { showAvatarMenu('other'); });
+    var bub = document.createElement('div');
+    bub.className = 'bubble';
+    bub.appendChild(document.createTextNode(text + ' '));
+    var dots = document.createElement('span');
+    dots.className = 'dots';
+    dots.innerHTML = '<i></i><i></i><i></i>';
+    bub.appendChild(dots);
+    statusRow.appendChild(av); statusRow.appendChild(bub);
+    msgs.appendChild(statusRow);
+    scrollBottom();
+  }
+  function removeStatus() {
+    if (statusRow) { statusRow.remove(); statusRow = null; }
+  }
+
+  /* ── 多选删除（仅手机端隐藏，电脑端会话保留） ── */
+  function attachLongPress(row) {
+    row._lpAt = 0;
+    var timer = null;
+    var moved = false;
+    var sx = 0, sy = 0;
+    row.addEventListener('touchstart', function (e) {
+      if (selectMode) return;
+      var t = e.changedTouches[0];
+      sx = t.clientX; sy = t.clientY; moved = false;
+      timer = setTimeout(function () {
+        if (!moved) {
+          row._lpAt = Date.now();
+          enterSelectMode();
+          var id = row.dataset.id;
+          if (id) { selectedIds[id] = true; updateRowChecks(); }
+        }
+      }, 500);
+    }, { passive: true });
+    row.addEventListener('touchmove', function (e) {
+      var t = e.changedTouches[0];
+      if (Math.abs(t.clientX - sx) > 12 || Math.abs(t.clientY - sy) > 12) moved = true;
+    }, { passive: true });
+    row.addEventListener('touchend', function () { clearTimeout(timer); }, { passive: true });
+    row.addEventListener('touchcancel', function () { clearTimeout(timer); }, { passive: true });
+    row.addEventListener('contextmenu', function (e) { e.preventDefault(); }, { passive: false });
+  }
+
+  function enterSelectMode() {
+    if (selectMode) return;
+    selectMode = true;
+    selectedIds = {};
+    document.getElementById('topbar').style.display = 'none';
+    document.getElementById('inputbar').style.display = 'none';
+    selectBar.classList.add('show');
+    updateRowChecks();
+  }
+
+  function exitSelectMode() {
+    selectMode = false;
+    selectedIds = {};
+    selectBar.classList.remove('show');
+    if (chatShown) {
+      document.getElementById('topbar').style.display = 'flex';
+      document.getElementById('inputbar').style.display = 'flex';
+    }
+    updateRowChecks();
+  }
+
+  function toggleSelect(row) {
+    if (!selectMode) return;
+    if (Date.now() - (row._lpAt || 0) < 600) return; // 长按后的合成 click，忽略
+    var id = row.dataset.id;
+    if (!id) return;
+    if (selectedIds[id]) delete selectedIds[id]; else selectedIds[id] = true;
+    updateRowChecks();
+  }
+
+  function updateRowChecks() {
+    var rows = msgs.querySelectorAll('.row');
+    var count = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var check = row.querySelector('.check');
+      var sel = selectMode && row.dataset.id && selectedIds[row.dataset.id];
+      if (selectMode) {
+        if (!check) {
+          check = document.createElement('div');
+          check.className = 'check';
+          row.insertBefore(check, row.firstChild);
+        }
+        row.classList.toggle('selected', !!sel);
+        if (sel) count++;
+      } else {
+        if (check) check.remove();
+        row.classList.remove('selected');
+      }
+    }
+    selectCount.textContent = '已选 ' + count + ' 条';
+    deleteBtn.style.opacity = count > 0 ? '1' : '.4';
+  }
+
+  function selectAll() {
+    if (!selectMode) return;
+    var rows = msgs.querySelectorAll('.row');
+    var allSelected = true;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].dataset.id && !selectedIds[rows[i].dataset.id]) { allSelected = false; break; }
+    }
+    if (allSelected) {
+      selectedIds = {};
+    } else {
+      for (var j = 0; j < rows.length; j++) {
+        if (rows[j].dataset.id) selectedIds[rows[j].dataset.id] = true;
+      }
+    }
+    updateRowChecks();
+  }
+
+  function deleteSelected() {
+    var ids = [];
+    for (var id in selectedIds) ids.push(id);
+    if (ids.length === 0) return;
+    api('/api/wechat/hide', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: ids })
+    }).then(function (r) {
+      if (r && r.ok === true) {
+        for (var k = 0; k < ids.length; k++) hiddenSet[ids[k]] = true;
+        var rows = msgs.querySelectorAll('.row');
+        for (var m = 0; m < rows.length; m++) {
+          if (rows[m].dataset.id && selectedIds[rows[m].dataset.id]) rows[m].remove();
+        }
+        toastText('已删除 ' + ids.length + ' 条（电脑端仍保留）');
+        exitSelectMode();
+      } else {
+        toastText((r && r.error) || '删除失败');
+      }
+    }).catch(function () { toastText('删除失败，请检查网络'); });
+  }
+
+  document.getElementById('selectCancelBtn').addEventListener('click', exitSelectMode);
+  document.getElementById('selectAllBtn').addEventListener('click', selectAll);
+  deleteBtn.addEventListener('click', deleteSelected);
+
+  /* ── 头像菜单 ──────────────────────────── */
+  function showAvatarMenu(side) {
+    avatarMenuSide = side === 'me' ? 'me' : 'other';
+    avatarMask.classList.add('show');
+    avatarMenu.classList.add('show');
+  }
+  function hideAvatarMenu() {
+    avatarMask.classList.remove('show');
+    avatarMenu.classList.remove('show');
+  }
+  avatarMask.addEventListener('click', hideAvatarMenu);
+  document.getElementById('avatarCancelItem').addEventListener('click', hideAvatarMenu);
+  document.getElementById('avatarChangeItem').addEventListener('click', function () {
+    hideAvatarMenu();
+    try {
+      if (window.WechatBridge && typeof window.WechatBridge.pickAvatar === 'function') {
+        window.WechatBridge.pickAvatar(avatarMenuSide);
+        return;
+      }
+    } catch (e) {}
+    toastText('当前环境不支持选择图片');
+  });
+  document.getElementById('backgroundChangeItem').addEventListener('click', function () {
+    hideAvatarMenu();
+    try {
+      if (window.WechatBridge && typeof window.WechatBridge.pickBackground === 'function') {
+        window.WechatBridge.pickBackground();
+        return;
+      }
+    } catch (e) {}
+    toastText('当前环境不支持选择图片');
+  });
+
+  /* ── 修改聊天对象名 ─────────────────────── */
+  function showNickDialog() {
+    nickInput.value = cfg.nickname || '';
+    nickMask.classList.add('show');
+    nickDialog.classList.add('show');
+    setTimeout(function () { try { nickInput.focus(); } catch (e) {} }, 100);
+  }
+  function hideNickDialog() {
+    nickMask.classList.remove('show');
+    nickDialog.classList.remove('show');
+  }
+  titleText.addEventListener('click', showNickDialog);
+  nickMask.addEventListener('click', hideNickDialog);
+  document.getElementById('nickCancelBtn').addEventListener('click', hideNickDialog);
+  document.getElementById('nickOkBtn').addEventListener('click', function () {
+    var name = nickInput.value.trim();
+    if (name === '') { toastText('名称不能为空'); return; }
+    api('/api/wechat/nickname', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nickname: name })
+    }).then(function (r) {
+      if (r && r.ok === true) {
+        cfg.nickname = name;
+        titleText.textContent = name;
+        hideNickDialog();
+        toastText('已更新');
+      } else {
+        toastText((r && r.error) || '更新失败');
+      }
+    }).catch(function () { toastText('更新失败，请检查网络'); });
+  });
+
+  /* Android 选择图片后回传 dataUrl，上传到服务器并刷新头像 */
+  window.wechatAvatarPicked = function (side, dataUrl) {
+    if (side !== 'me' && side !== 'other') return;
+    if (typeof dataUrl !== 'string' || dataUrl === '') { toastText('读取图片失败'); return; }
+    api('/api/wechat/avatar/upload', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ side: side, data: dataUrl })
+    }).then(function (r) {
+      if (r && r.ok === true) {
+        toastText('头像已更新');
+        var v = Date.now();
+        if (side === 'other') cfg.avatarOther = '/api/wechat/avatar/other?v=' + v;
+        else cfg.avatarMe = '/api/wechat/avatar/me?v=' + v;
+        refreshAvatars();
+      } else {
+        toastText((r && r.error) || '头像更新失败');
+      }
+    }).catch(function () { toastText('上传失败，请检查网络'); });
+  };
+
+  function refreshAvatars() {
+    var rows = msgs.querySelectorAll('.row');
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var av = row.querySelector('.avatar');
+      if (!av) continue;
+      var url = row.classList.contains('me') ? cfg.avatarMe : cfg.avatarOther;
+      av.style.backgroundImage = url ? 'url("' + url + '")' : '';
+    }
+  }
+
+  /* Android 选择背景图片后回传 dataUrl，上传到服务器并应用 */
+  window.wechatBackgroundPicked = function (dataUrl) {
+    if (typeof dataUrl !== 'string' || dataUrl === '') { toastText('读取图片失败'); return; }
+    api('/api/wechat/background/upload', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: dataUrl })
+    }).then(function (r) {
+      if (r && r.ok === true) {
+        toastText('背景已更新');
+        applyBackground('/api/wechat/background?v=' + Date.now());
+      } else {
+        toastText((r && r.error) || '背景更新失败');
+      }
+    }).catch(function () { toastText('上传失败，请检查网络'); });
+  };
+
+  function applyBackground(url) {
+    msgs.style.backgroundImage = url ? 'url("' + url + '")' : '';
+    msgs.style.backgroundSize = 'cover';
+    msgs.style.backgroundPosition = 'center';
+    msgs.style.backgroundRepeat = 'no-repeat';
+  }
+
+  function showGuide() {
+    chatShown = false;
+    guide.classList.remove('hidden');
+    document.getElementById('topbar').style.display = 'none';
+    document.getElementById('inputbar').style.display = 'none';
+  }
+  function showChat() {
+    chatShown = true;
+    guide.classList.add('hidden');
+    document.getElementById('topbar').style.display = 'flex';
+    document.getElementById('inputbar').style.display = 'flex';
+    syncLayout();
+  }
+
+  /* ── 服务端通信 ────────────────────────── */
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    if (deviceId) opts.headers['x-whale-device'] = deviceId;
+    var sep = path.indexOf('?') >= 0 ? '&' : '?';
+    if (deviceId) { path = path + sep + 'device=' + encodeURIComponent(deviceId); sep = '&'; }
+    if (clientId) path = path + sep + 'client=' + encodeURIComponent(clientId);
+    return fetch(path, opts).then(function (r) { return r.json(); });
+  }
+
+  function loadState() {
+    api('/api/wechat/state').then(function (s) {
+      if (!s || s.paired !== true) { showGuide(); return; }
+      cfg = {
+        nickname: s.nickname || cfg.nickname,
+        avatarOther: s.avatarOther || '',
+        avatarMe: s.avatarMe || ''
+      };
+      titleText.textContent = cfg.nickname;
+      showChat();
+      if (s.background) applyBackground(s.background);
+      (s.hiddenIds || []).forEach(function (id) { hiddenSet[id] = true; });
+      (s.history || []).forEach(function (m) {
+        if (m.id && hiddenSet[m.id]) return;
+        if (m.id) seenMsgIds[m.id] = true;
+        if (m.role === 'user') addRow('me', m.text, cfg.avatarMe, m.id);
+        else addAssistant(m.text, m.id);
+      });
+      if (s.busy) setStatus('正在思考');
+      startPolling();
+    }).catch(function () { showGuide(); });
+  }
+
+  function handleEvent(m) {
+    if (!m || !m.type) return;
+    if (m.type === 'user') {
+      if (m.id && hiddenSet[m.id]) return;
+      if (m.id) {
+        if (seenMsgIds[m.id]) return;
+        seenMsgIds[m.id] = true;
+        // 用服务器下发的稳定 id 回填乐观渲染的那条待定气泡
+        var pending = msgs.querySelector('.row.me[data-pending="1"]');
+        if (pending) {
+          pending.dataset.id = m.id;
+          pending.removeAttribute('data-pending');
+        } else {
+          addRow('me', m.text, cfg.avatarMe, m.id);
+        }
+      } else {
+        addRow('me', m.text, cfg.avatarMe);
+      }
+    } else if (m.type === 'status') {
+      setStatus(m.text || '正在思考');
+    } else if (m.type === 'busy') {
+      if (m.value) { busy = true; if (!statusRow) setStatus('正在思考'); }
+      else { busy = false; removeStatus(); }
+    } else if (m.type === 'assistant') {
+      if (m.id && hiddenSet[m.id]) return;
+      if (m.id) {
+        if (seenMsgIds[m.id]) return;
+        seenMsgIds[m.id] = true;
+      }
+      removeStatus();
+      addAssistant(m.text, m.id);
+    } else if (m.type === 'error') {
+      removeStatus();
+      toastText(m.message || '出错了');
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    var tick = function () {
+      // 串行化：上一个请求完成后再调度下一个，避免网络差时重叠导致重复渲染
+      api('/api/wechat/poll?since=' + lastSeq).then(function (r) {
+        if (r && r.ok === true) {
+          if (r.busy && !statusRow) setStatus('正在思考');
+          (r.events || []).forEach(handleEvent);
+          lastSeq = r.seq || lastSeq;
+        }
+      }).catch(function () {}).then(function () {
+        pollTimer = setTimeout(tick, 1500);
+      });
+    };
+    tick();
+  }
+
+  /* ── 发送 ──────────────────────────────── */
+  function send() {
+    var text = input.value.trim();
+    if (text === '' || busy) return;
+    input.value = '';
+    input.style.height = '';
+    sendBtn.disabled = true;
+    var row = addRow('me', text, cfg.avatarMe);
+    row.setAttribute('data-pending', '1');
+    busy = true;
+    setStatus('正在思考');
+    syncLayout();
+    api('/api/wechat/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: text })
+    }).then(function (r) {
+      if (!r || r.ok !== true) {
+        busy = false; removeStatus();
+        toastText((r && r.error) || '发送失败，请检查电脑端');
+      }
+    }).catch(function () {
+      busy = false; removeStatus();
+      toastText('网络错误：无法连接电脑');
+    });
+  }
+  sendBtn.addEventListener('click', send);
+
+  /* 输入框随内容自动增高 */
+  function autoGrow() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    sendBtn.disabled = input.value.trim() === '';
+    syncLayout();
+  }
+  input.addEventListener('input', autoGrow);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  });
+
+  /* ── 语音输入 ──────────────────────────── */
+  var voiceMode = false;
+  function setVoiceMode(on) {
+    voiceMode = on;
+    if (on) {
+      input.style.display = 'none';
+      sendBtn.style.display = 'none';
+      holdTalk.classList.add('show');
+    } else {
+      input.style.display = '';
+      sendBtn.style.display = '';
+      holdTalk.classList.remove('show');
+    }
+  }
+  voiceBtn.addEventListener('click', function () { setVoiceMode(!voiceMode); });
+
+  holdTalk.addEventListener('click', function () {
+    try {
+      if (window.WechatBridge && typeof window.WechatBridge.launchVoice === 'function') {
+        window.WechatBridge.launchVoice();
+        return;
+      }
+    } catch (err) {}
+    toastText('当前环境不支持语音输入');
+  });
+
+  /* 语音识别结果回来：转成文字直接发送 */
+  window.wechatVoiceResult = function (text) {
+    if (typeof text !== 'string' || text.trim() === '') { toastText('没有识别到内容'); return; }
+    input.value = text.trim();
+    autoGrow();
+    send();
+  };
+  /* 语音识别出错提示 */
+  window.wechatVoiceError = function (msg) {
+    toastText(msg || '语音识别失败');
+  };
+
+  /* ── 扫码 / 配对 ───────────────────────── */
+  function pairFromUrl(url) {
+    var u;
+    try { u = new URL(url); } catch (err) { toastText('链接格式不对'); return; }
+    // 导航式配对：服务器在 /wechat?pair= 上校验令牌 → 下发设备 cookie → 跳回聊天页
+    location.href = url;
+  }
+  function startScan() {
+    try {
+      if (window.WechatBridge && typeof window.WechatBridge.scanQR === 'function') {
+        window.WechatBridge.scanQR();
+        return;
+      }
+    } catch (e) {}
+    toastText('当前浏览器不支持扫码，请粘贴配对链接');
+  }
+  window.wechatOnScanResult = function (url) {
+    if (typeof url === 'string' && url !== '') pairFromUrl(url);
+  };
+  document.getElementById('scanBtn').addEventListener('click', startScan);
+  document.getElementById('guideScanBtn').addEventListener('click', startScan);
+  document.getElementById('pasteBtn').addEventListener('click', function () {
+    pairFromUrl(document.getElementById('pasteInput').value.trim());
+  });
+
+  /* ── 键盘顶起 + 输入条增高时，消息区底部动态跟随 ── */
+  function syncLayout() {
+    var inputbar = document.getElementById('inputbar');
+    var kb = 0;
+    if (window.visualViewport) {
+      kb = Math.max(0, window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop);
+    }
+    inputbar.style.bottom = kb + 'px';
+    msgs.style.bottom = (inputbar.offsetHeight + kb) + 'px';
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncLayout);
+    window.visualViewport.addEventListener('scroll', syncLayout);
+  }
+  window.addEventListener('resize', syncLayout);
+
+  loadState();
+})();
+</script>
+</body>
+</html>

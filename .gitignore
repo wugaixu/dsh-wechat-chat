@@ -1,0 +1,25 @@
+# ---- Node / 插件安装副作用 ----
+node_modules/
+*.tgz
+package-lock.json
+*.log
+.smoke-out/
+.e2e-out/
+
+# ---- Android 构建产物 ----
+app/.gradle/
+app/build/
+app/app/build/
+app/local.properties
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+
+# ---- 运行时用户数据（头像/背景为个人图片，不进仓库）----
+avatars/
+
+# ---- 系统 ----
+Thumbs.db
+.DS_Store

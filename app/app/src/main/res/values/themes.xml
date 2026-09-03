@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:statusBarColor">#f7f7f7</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">#ededed</item>
+    </style>
+
+    <!-- 裁剪界面专用：黑色状态栏，避免按钮与状态栏重叠 -->
+    <style name="UCropTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#000000</item>
+    </style>
+</resources>

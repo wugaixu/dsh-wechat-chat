@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鲸聊 · 配对</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,sans-serif;
+    background:#ededed; color:#191919; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  .card { width:400px; max-width:100%; background:#fff; border-radius:16px; padding:28px 24px;
+    box-shadow:0 6px 24px rgba(0,0,0,.08); text-align:center; }
+  .logo { width:56px; height:56px; border-radius:14px; background:#07c160; margin:0 auto 8px;
+    display:flex; align-items:center; justify-content:center; }
+  .logo svg { width:30px; height:30px; color:#fff; }
+  h1 { font-size:19px; font-weight:600; }
+  .sub { font-size:13px; color:#8a8a8a; margin:6px 0 14px; line-height:1.6; }
+  #tun { font-size:12px; color:#07c160; word-break:break-all; margin-bottom:10px; min-height:16px; }
+  #tun.err { color:#d0392b; }
+  .qr { min-height:190px; display:flex; align-items:center; justify-content:center; }
+  .qr svg { image-rendering: pixelated; }
+  .linkrow { display:flex; gap:6px; margin-top:8px; }
+  .linkrow input { flex:1; height:34px; border:1px solid #e5e5e5; border-radius:8px; background:#f7f7f7;
+    font-size:11px; color:#666; padding:0 8px; outline:none; user-select:all; }
+  .linkrow button { height:34px; padding:0 12px; border:none; border-radius:8px; background:#07c160;
+    color:#fff; font-size:12px; cursor:pointer; }
+  .row { display:flex; gap:10px; justify-content:center; margin-top:12px; }
+  .btn { height:38px; padding:0 16px; border:none; border-radius:10px; font-size:14px; cursor:pointer; }
+  .btn.primary { background:#07c160; color:#fff; font-weight:600; }
+  .btn.danger { background:#fdecea; color:#d0392b; }
+  .btn:active { opacity:.8; }
+  #msg { margin-top:12px; font-size:12px; color:#8a8a8a; min-height:16px; }
+  #msg.err { color:#d0392b; }
+  .hint { margin-top:12px; font-size:11px; color:#b0b0b0; line-height:1.6; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+      </svg>
+    </div>
+    <h1>鲸聊 · 配对</h1>
+    <p class="sub">用手机「鲸聊」App 扫一扫连接<br>经免费公网隧道（Cloudflare，无需账号）</p>
+
+    <div id="tun">正在连接公网隧道…</div>
+    <div class="qr" id="qr"></div>
+    <div class="linkrow"><input id="link" readonly value=""><button onclick="copyLink()">复制链接</button></div>
+
+    <div class="row">
+      <button class="btn primary" onclick="refresh()">刷新二维码</button>
+      <button class="btn danger" onclick="stopPair()">断开全部</button>
+    </div>
+
+    <div id="msg"></div>
+    <div class="hint">二维码 10 分钟内有效，一次扫码即完成配对；<br>本页面仅限电脑本机打开（127.0.0.1）。<br>公网地址每次重启会变，手机重新扫码即可。</div>
+  </div>
+
+<script>
+__QRCODE_LIB__
+(function () {
+  'use strict';
+  var msg = document.getElementById('msg');
+  var link = document.getElementById('link');
+  var tunEl = document.getElementById('tun');
+  var tunnelRunning = false;
+  var hasQr = false;
+
+  function setMsg(text, isErr) {
+    msg.textContent = text;
+    msg.className = isErr ? 'err' : '';
+  }
+
+  function renderQR(text) {
+    try {
+      var qr = qrcode(0, 'M');
+      qr.addData(text);
+      qr.make();
+      document.getElementById('qr').innerHTML = qr.createSvgTag({ cellSize: 5, margin: 2 });
+      hasQr = true;
+    } catch (e) {
+      document.getElementById('qr').innerHTML = '';
+      hasQr = false;
+    }
+  }
+
+  function refresh() {
+    if (!tunnelRunning) { setMsg('公网隧道尚未就绪，请稍候…', true); return; }
+    setMsg('正在生成二维码…');
+    fetch('/api/whale/pair/issue', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (r && r.ok === true) {
+          renderQR(r.url);
+          link.value = r.url;
+          var mins = Math.max(1, Math.round((r.expiresAt - Date.now()) / 60000));
+          setMsg('二维码有效 ' + mins + ' 分钟，等待手机扫码…');
+        } else {
+          document.getElementById('qr').innerHTML = '';
+          link.value = '';
+          setMsg((r && r.error) || '无法生成二维码', true);
+        }
+      })
+      .catch(function () { setMsg('请求失败', true); });
+  }
+  window.refresh = refresh;
+
+  function pollTunnel() {
+    fetch('/api/whale/pair/tunnel')
+      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r || r.ok !== true) { tunEl.textContent = '服务不可用'; tunEl.className = 'err'; return; }
+        var t = r.tunnel || {};
+        var wasRunning = tunnelRunning;
+        if (t.phase === 'running' && t.url) {
+          tunnelRunning = true;
+          tunEl.textContent = '公网隧道已连接 ' + t.url;
+          tunEl.className = '';
+          // 隧道刚就绪（或刚打开面板）就自动出码
+          if (!wasRunning && !hasQr) refresh();
+        } else if (t.phase === 'starting') {
+          tunnelRunning = false;
+          tunEl.textContent = '公网隧道连接中…';
+          tunEl.className = '';
+        } else if (t.phase === 'failed') {
+          tunnelRunning = false;
+          tunEl.textContent = '公网隧道失败（' + (t.error || '未知') + '，自动重试中）';
+          tunEl.className = 'err';
+        } else {
+          tunnelRunning = false;
+          tunEl.textContent = '公网隧道未开启';
+          tunEl.className = 'err';
+        }
+      })
+      .catch(function () {});
+    setTimeout(pollTunnel, 3000);
+  }
+  pollTunnel();
+
+  window.copyLink = function () {
+    if (link.value === '') return;
+    try { navigator.clipboard.writeText(link.value); setMsg('已复制到剪贴板'); } catch (e) {
+      link.select();
+      try { document.execCommand('copy'); setMsg('已复制到剪贴板'); } catch (e2) { setMsg('请手动选择链接复制', true); }
+    }
+  };
+
+  window.stopPair = function () {
+    if (!window.confirm('断开全部已配对设备？手机将需要重新扫码。')) return;
+    fetch('/api/whale/pair/stop', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        document.getElementById('qr').innerHTML = '';
+        link.value = '';
+        hasQr = false;
+        setMsg('已断开全部设备。点击「刷新二维码」重新开启');
+      })
+      .catch(function () { setMsg('操作失败', true); });
+  };
+})();
+</script>
+</body>
+</html>

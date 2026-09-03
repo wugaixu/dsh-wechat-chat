@@ -1,0 +1,45 @@
+{
+  "name": "dsh-wechat-chat",
+  "version": "1.1.0",
+  "description": "鲸聊：微信式聊天遥控器 + 自带扫码配对/设备门控/免费公网隧道。Host 半区驱动电脑上的真实会话；client 半区在官方侧栏底部注册鲸聊入口。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "verify": "node verify-release.mjs"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.2-alpha.1"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wugaixu/dsh-wechat-chat.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "wechat",
+    "remote",
+    "chat",
+    "android"
+  ],
+  "license": "MIT"
+}
