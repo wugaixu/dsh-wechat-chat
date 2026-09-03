@@ -11,6 +11,10 @@ app/.gradle/
 app/build/
 app/app/build/
 app/local.properties
+*.apk
+
+# ---- 密钥（本地，不提交）----
+secrets.properties
 
 # ---- IDE ----
 .idea/

@@ -2,10 +2,27 @@ plugins {
     id 'com.android.application'
 }
 
+// 读取讯飞密钥：secrets.properties（本地，不提交）优先，否则回退到 example 模板
+def secretsFile = file('secrets.properties')
+def secrets = new Properties()
+if (secretsFile.exists()) {
+    secrets.load(new FileInputStream(secretsFile))
+} else {
+    def ex = file('secrets.properties.example')
+    if (ex.exists()) secrets.load(new FileInputStream(ex))
+}
+def IFLYTEK_APP_ID = secrets.getProperty('IFLYTEK_APP_ID', 'your_app_id')
+def IFLYTEK_API_KEY = secrets.getProperty('IFLYTEK_API_KEY', 'your_api_key')
+def IFLYTEK_API_SECRET = secrets.getProperty('IFLYTEK_API_SECRET', 'your_api_secret')
+
 android {
     namespace 'com.dsh.wechat'
     compileSdk 35
     buildToolsVersion '35.0.0'
+
+    buildFeatures {
+        buildConfig true
+    }
 
     signingConfigs {
         debug {
@@ -22,6 +39,9 @@ android {
         targetSdk 35
         versionCode 2
         versionName "1.1"
+        buildConfigField "String", "IFLYTEK_APP_ID", "\"${IFLYTEK_APP_ID}\""
+        buildConfigField "String", "IFLYTEK_API_KEY", "\"${IFLYTEK_API_KEY}\""
+        buildConfigField "String", "IFLYTEK_API_SECRET", "\"${IFLYTEK_API_SECRET}\""
     }
 
     buildTypes {

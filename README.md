@@ -139,6 +139,8 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
 **头像 / 背景**：手机 App 内点头像即可修改（或把图片放到 `$DSH_HOME/wechat-chat/avatars/`：
 `other.*` 对方头像、`me.*` 自己头像、`background.*` 聊天背景）。
 **界面样式**：改 `plugin/lib/chat-page.html` 内的 CSS（改动后刷新页面即可，无需重启）。
+**语音输入**：使用讯飞语音听写，密钥需填到 `app/app/secrets.properties`（本地、不提交）；
+申请与配置步骤见 [`docs/iflytek-voice.md`](docs/iflytek-voice.md)。
 
 ## 已知限制
 

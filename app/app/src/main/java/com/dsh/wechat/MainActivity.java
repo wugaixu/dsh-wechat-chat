@@ -64,10 +64,10 @@ public class MainActivity extends AppCompatActivity {
     private String pendingAvatarSide = "other";
     private String pendingPickKind = "avatar";
 
-    // 讯飞语音听写（WebSocket，系统网络栈）
-    private static final String IF_APP_ID = "100a0cb5";
-    private static final String IF_API_KEY = "ccbe233d65d840587c4e00300412f46e";
-    private static final String IF_API_SECRET = "MTNmY2UyYWY1MzkwMzZhZjFiMWJhYzYy";
+    // 讯飞语音听写（WebSocket，系统网络栈）；密钥由 BuildConfig 从 secrets.properties 注入
+    private static final String IF_APP_ID = BuildConfig.IFLYTEK_APP_ID;
+    private static final String IF_API_KEY = BuildConfig.IFLYTEK_API_KEY;
+    private static final String IF_API_SECRET = BuildConfig.IFLYTEK_API_SECRET;
     private static final String IF_HOST = "iat-api.xfyun.cn";
     private WebSocket iatWs = null;
     private AudioRecord audioRecord = null;
