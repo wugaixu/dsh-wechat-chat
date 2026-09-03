@@ -159,9 +159,16 @@
     word-break: break-all; color: #fff;
   }
   .voice-hint .text:empty { display: none; }
+  .voice-hint .cancel-hint {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 12px; color: #c0c0c0;
+  }
+  .voice-hint .cancel-hint svg { width: 14px; height: 14px; color: #c0c0c0; }
   .voice-hint.cancelling .mic::before,
   .voice-hint.cancelling .mic::after { border-color: rgba(255,69,58,.9); }
   .voice-hint.cancelling .label { color: #ff453a; }
+  .voice-hint.cancelling .cancel-hint,
+  .voice-hint.cancelling .cancel-hint svg { color: #ff453a; }
 
   /* ── 头像菜单（底部弹层） ───────────────── */
   .avatar-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 60; display: none; }
@@ -312,6 +319,12 @@
     </div>
     <span class="label" id="voiceHintLabel">正在识别，松开结束</span>
     <div class="text" id="voiceHintText"></div>
+    <div class="cancel-hint" id="voiceCancelHint">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>
+      </svg>
+      <span id="voiceCancelHintText">上滑取消</span>
+    </div>
   </div>
 
   <div class="avatar-mask" id="avatarMask"></div>
@@ -937,6 +950,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
   var voiceHint = document.getElementById('voiceHint');
   var voiceHintLabel = document.getElementById('voiceHintLabel');
   var voiceHintText = document.getElementById('voiceHintText');
+  var voiceCancelHintText = document.getElementById('voiceCancelHintText');
   var voiceStartY = 0;
   var voiceCancelling = false;
   function showVoiceHint(on) {
@@ -947,9 +961,11 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     if (on) {
       voiceHint.classList.add('cancelling');
       voiceHintLabel.textContent = '松开取消';
+      voiceCancelHintText.textContent = '松开取消';
     } else {
       voiceHint.classList.remove('cancelling');
       voiceHintLabel.textContent = '正在识别，松开结束';
+      voiceCancelHintText.textContent = '上滑取消';
     }
   }
   holdTalk.addEventListener('touchstart', function (e) {
