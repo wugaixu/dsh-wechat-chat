@@ -2,18 +2,13 @@ package com.dsh.wechat;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
-import android.speech.RecognitionListener;
-import android.speech.RecognizerIntent;
-import android.speech.SpeechRecognizer;
 import android.util.Base64;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -35,13 +30,18 @@ import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
 import com.yalantis.ucrop.UCrop;
 
+import com.iflytek.sparkchain.core.SparkChain;
+import com.iflytek.sparkchain.core.SparkChainConfig;
+import com.iflytek.sparkchain.core.asr.ASR;
+import com.iflytek.sparkchain.core.asr.AsrCallbacks;
+import com.iflytek.sparkchain.core.asr.AudioRecorder;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Arrays;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -49,12 +49,12 @@ public class MainActivity extends AppCompatActivity {
     private static final int CAMERA_REQ = 100;
     private static final int PICK_AVATAR_REQ = 200;
     private static final int PICK_BG_REQ = 300;
-    private static final int VOICE_REQ = 400;
     private static final int REC_AUDIO_REQ = 500;
     private boolean pendingScan = false;
     private String pendingAvatarSide = "other";
     private String pendingPickKind = "avatar";
-    private SpeechRecognizer speechRecognizer = null;
+    private ASR iflyAsr = null;
+    private boolean voiceActive = false;
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -99,6 +99,7 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient());
         webView.addJavascriptInterface(new Bridge(), "WechatBridge");
         CookieManager.getInstance().setAcceptCookie(true);
+        initIflytek();
 
         String origin = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", null);
         if (origin == null || origin.isEmpty()) {
@@ -147,148 +148,94 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * 语音输入入口：优先系统识别对话框（有对应 Activity 时）；
-     * 国产 ROM 常只有识别服务、没有对话框，此时回退到流式 SpeechRecognizer。
-     */
-    private void startVoiceRecognition() {
-        Intent dialog = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        dialog.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        dialog.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
-        dialog.putExtra(RecognizerIntent.EXTRA_PROMPT, "请说话");
-        dialog.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-        if (dialog.resolveActivity(getPackageManager()) != null) {
-            try {
-                startActivityForResult(dialog, VOICE_REQ);
-                return;
-            } catch (Exception e) {
-                // 打开失败则继续尝试流式识别
+    /** 初始化讯飞 SparkChain（全局一次）。 */
+    private void initIflytek() {
+        try {
+            SparkChainConfig config = SparkChainConfig.builder()
+                    .appID("100a0cb5")
+                    .apiKey("MTNmY2UyYWY1MzkwMzZhZjFiMWJhYzYy")
+                    .apiSecret("ccbe233d65d840587c4e00300412f46e")
+                    .workDir(getFilesDir().getAbsolutePath())
+                    .logLevel(100); // 关闭日志
+            int ret = SparkChain.getInst().init(getApplicationContext(), config);
+            if (ret != 0) {
+                android.util.Log.w("wechat-chat", "SparkChain init failed: " + ret);
             }
+        } catch (Throwable t) {
+            android.util.Log.w("wechat-chat", "SparkChain init error: " + t);
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            voiceError("当前设备不支持语音识别");
-            return;
-        }
-        startStreamingRecognition();
     }
 
-    /** 流式语音识别（无对话框但有识别服务的设备）。 */
-    private void startStreamingRecognition() {
+    /** 语音输入入口：讯飞语音听写（SparkChain ASR）。 */
+    private void startVoiceRecognition() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REC_AUDIO_REQ);
             return;
         }
-        // 每次重建，避免上次错误留下的陈旧状态导致 ERROR_CLIENT
-        destroyRecognizer();
+        if (voiceActive) { voiceError("正在识别中，请稍候"); return; }
         try {
-            final ComponentName general = findGeneralRecognitionService();
-            final SpeechRecognizer rec = general != null
-                    ? SpeechRecognizer.createSpeechRecognizer(this, general)
-                    : SpeechRecognizer.createSpeechRecognizer(this);
-            speechRecognizer = rec;
-            rec.setRecognitionListener(makeListener());
-            final Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-            // 不加 EXTRA_LANGUAGE：部分引擎不支持 zh-CN 覆盖会报 ERROR_CLIENT
-            // 延迟启动，等识别服务绑定完成，避免绑定竞态导致 ERROR_CLIENT
-            webView.postDelayed(() -> {
-                try {
-                    if (speechRecognizer == rec) rec.startListening(intent);
-                } catch (Exception e) {
-                    voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
-                }
-            }, 250);
-        } catch (Exception e) {
-            voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
-        }
-    }
-
-    /**
-     * 枚举设备上的语音识别服务，跳过“唤醒词/助手类”服务（如 vivo Copilot wakeup），
-     * 返回第一个看起来像“通用语音转文字”的服务；找不到则返回 null（回退默认）。
-     */
-    private ComponentName findGeneralRecognitionService() {
-        try {
-            PackageManager pm = getPackageManager();
-            Intent probe = new Intent("android.speech.RecognitionService");
-            List<ResolveInfo> services = pm.queryIntentServices(probe, 0);
-            for (ResolveInfo ri : services) {
-                if (ri == null || ri.serviceInfo == null) continue;
-                ComponentName cn = new ComponentName(ri.serviceInfo.packageName, ri.serviceInfo.name);
-                String key = (cn.getPackageName() + "/" + cn.getClassName()).toLowerCase();
-                if (key.contains("wakeup") || key.contains("copilot") || key.contains("hotword")
-                        || key.contains("wakeword") || key.contains("wake")) continue;
-                return cn;
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
-
-    private RecognitionListener makeListener() {
-        return new RecognitionListener() {
-            @Override public void onResults(Bundle results) {
-                ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                final String text = (matches != null && !matches.isEmpty()) ? matches.get(0) : "";
-                runOnUiThread(() -> {
-                    if (!text.trim().isEmpty()) {
-                        webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
-                    } else {
-                        voiceError("没有识别到内容");
+            stopIflyVoice();
+            final ASR asr = new ASR("zh_cn", "iat", "mandarin");
+            iflyAsr = asr;
+            asr.registerCallbacks(new AsrCallbacks() {
+                @Override public void onResult(ASR.ASRResult result, Object usrTag) {
+                    if (result.getStatus() == 2) { // 2=最终结果
+                        final String text = result.getBestMatchText();
+                        runOnUiThread(() -> finishIflyVoice(text));
                     }
-                });
+                }
+                @Override public void onError(ASR.ASRError error, Object usrTag) {
+                    final String msg = "语音识别失败(" + error.getCode() + ")：" + (error.getErrMsg() == null ? "" : error.getErrMsg());
+                    runOnUiThread(() -> { stopIflyVoice(); voiceError(msg); });
+                }
+                @Override public void onEndOfSpeech() {
+                    runOnUiThread(() -> stopIflyVoice());
+                }
+            });
+            int ret = asr.start("wechat");
+            if (ret != 0) {
+                iflyAsr = null;
+                voiceError("语音识别启动失败（" + ret + "）");
+                return;
             }
-            @Override public void onError(int error) {
-                final String msg = voiceErrorText(error);
-                runOnUiThread(() -> voiceError(msg));
-            }
-            @Override public void onReadyForSpeech(Bundle params) {}
-            @Override public void onBeginningOfSpeech() {}
-            @Override public void onRmsChanged(float rmsdB) {}
-            @Override public void onBufferReceived(byte[] buffer) {}
-            @Override public void onEndOfSpeech() {}
-            @Override public void onPartialResults(Bundle partialResults) {}
-            @Override public void onEvent(int eventType, Bundle params) {}
-        };
-    }
-
-    private void destroyRecognizer() {
-        if (speechRecognizer != null) {
-            try { speechRecognizer.cancel(); } catch (Exception e) {}
-            try { speechRecognizer.destroy(); } catch (Exception e) {}
-            speechRecognizer = null;
+            final AudioRecorder recorder = AudioRecorder.getInstance();
+            recorder.registerCallBack(new AudioRecorder.AudioDataCallback() {
+                @Override public void onAudioData(byte[] data, int size) {
+                    if (iflyAsr != null && size > 0 && size <= data.length) {
+                        try { iflyAsr.write(Arrays.copyOf(data, size)); } catch (Throwable ignored) {}
+                    }
+                }
+                @Override public void onAudioVolume(double volume, int size) {}
+            });
+            recorder.startRecord();
+            voiceActive = true;
+            // 兜底：15 秒无结果自动收尾
+            webView.postDelayed(() -> { if (voiceActive) stopIflyVoice(); }, 15000);
+        } catch (Throwable t) {
+            voiceError("语音识别启动失败：" + (t.getMessage() == null ? "未知错误" : t.getMessage()));
         }
     }
 
-    /** 流式识别的错误码 → 中文提示（带错误码，便于定位）。 */
-    private String voiceErrorText(int error) {
-        switch (error) {
-            case SpeechRecognizer.ERROR_AUDIO: return "录音失败（麦克风不可用）";
-            case SpeechRecognizer.ERROR_CLIENT: return "语音识别客户端错误（错误码 " + error + "）" + recognitionServiceHint();
-            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "没有麦克风权限";
-            case SpeechRecognizer.ERROR_NETWORK: return "网络连接失败";
-            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "网络超时";
-            case SpeechRecognizer.ERROR_NO_MATCH: return "没有识别到内容";
-            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: return "识别服务忙，请稍后再试";
-            case SpeechRecognizer.ERROR_SERVER: return "识别服务错误（错误码 " + error + "）";
-            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT: return "没有说话";
-            default: return "语音识别失败（错误码 " + error + "）";
+    private void stopIflyVoice() {
+        voiceActive = false;
+        try { AudioRecorder.getInstance().stopRecord(); } catch (Throwable ignored) {}
+        final ASR a = iflyAsr;
+        iflyAsr = null;
+        if (a != null) {
+            try { a.stop(false); } catch (Throwable ignored) {}
         }
+    }
+
+    private void finishIflyVoice(String text) {
+        stopIflyVoice();
+        if (text == null || text.trim().isEmpty()) { voiceError("没有识别到内容"); return; }
+        webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
     }
 
     /** 语音出错：Toast + 回传页面提示。 */
     private void voiceError(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
         webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError(" + jsonQuote(msg) + ");", null);
-    }
-
-    /** 读取设备默认语音识别服务名，附在 ERROR_CLIENT 后便于定位。 */
-    private String recognitionServiceHint() {
-        try {
-            String svc = android.provider.Settings.Secure.getString(getContentResolver(), "voice_recognition_service");
-            if (svc != null && !svc.isEmpty()) return "；当前识别服务：" + svc;
-        } catch (Exception ignored) {}
-        return "";
     }
 
     private void openGallery(String title, int requestCode) {
@@ -324,7 +271,7 @@ public class MainActivity extends AppCompatActivity {
         }
         if (requestCode == REC_AUDIO_REQ) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startStreamingRecognition();
+                startVoiceRecognition();
             } else {
                 voiceError("需要麦克风权限才能语音输入");
             }
@@ -370,24 +317,6 @@ public class MainActivity extends AppCompatActivity {
             } else if (resultCode == UCrop.RESULT_ERROR) {
                 Toast.makeText(this, "裁剪失败", Toast.LENGTH_SHORT).show();
             }
-            return;
-        }
-
-        if (requestCode == VOICE_REQ) {
-            if (resultCode == RESULT_OK && data != null) {
-                ArrayList<String> results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-                final String text = (results != null && !results.isEmpty()) ? results.get(0) : "";
-                if (!text.trim().isEmpty()) {
-                    webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
-                } else {
-                    webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError('没有识别到内容');", null);
-                }
-            } else if (resultCode == RecognizerIntent.RESULT_AUDIO_ERROR) {
-                webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError('录音出错，请重试');", null);
-            } else if (resultCode == RecognizerIntent.RESULT_NETWORK_ERROR) {
-                webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError('网络出错，请重试');", null);
-            }
-            // RESULT_CANCELED：用户取消，静默处理
             return;
         }
 
@@ -460,7 +389,8 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        destroyRecognizer();
+        stopIflyVoice();
+        try { SparkChain.getInst().unInit(); } catch (Throwable ignored) {}
         super.onDestroy();
     }
 }
