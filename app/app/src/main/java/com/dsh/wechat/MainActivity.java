@@ -136,12 +136,12 @@ public class MainActivity extends AppCompatActivity {
 
         @JavascriptInterface
         public void launchVoice() {
-            runOnUiThread(() -> launchVoice());
+            runOnUiThread(() -> startVoiceRecognition());
         }
     }
 
     /** 唤起系统语音识别对话框（RecognizerIntent）：国产 ROM 上比 SpeechRecognizer 流式接口更稳定。 */
-    private void launchVoice() {
+    private void startVoiceRecognition() {
         Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
