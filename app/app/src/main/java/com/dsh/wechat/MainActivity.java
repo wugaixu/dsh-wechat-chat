@@ -52,7 +52,6 @@ public class MainActivity extends AppCompatActivity {
     private String pendingAvatarSide = "other";
     private String pendingPickKind = "avatar";
     private SpeechRecognizer speechRecognizer = null;
-    private Intent recognizerIntent = null;
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -176,48 +175,61 @@ public class MainActivity extends AppCompatActivity {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REC_AUDIO_REQ);
             return;
         }
-        ensureRecognizer();
+        // 每次重建，避免上次错误留下的陈旧状态导致 ERROR_CLIENT
+        destroyRecognizer();
         try {
-            speechRecognizer.startListening(recognizerIntent);
+            final SpeechRecognizer rec = SpeechRecognizer.createSpeechRecognizer(this);
+            speechRecognizer = rec;
+            rec.setRecognitionListener(makeListener());
+            final Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+            // 不加 EXTRA_LANGUAGE：部分引擎不支持 zh-CN 覆盖会报 ERROR_CLIENT
+            // 延迟启动，等识别服务绑定完成，避免绑定竞态导致 ERROR_CLIENT
+            webView.postDelayed(() -> {
+                try {
+                    if (speechRecognizer == rec) rec.startListening(intent);
+                } catch (Exception e) {
+                    voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
+                }
+            }, 250);
         } catch (Exception e) {
             voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
         }
     }
 
-    private void ensureRecognizer() {
-        if (speechRecognizer == null) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
-            speechRecognizer.setRecognitionListener(new RecognitionListener() {
-                @Override public void onResults(Bundle results) {
-                    ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    final String text = (matches != null && !matches.isEmpty()) ? matches.get(0) : "";
-                    runOnUiThread(() -> {
-                        if (!text.trim().isEmpty()) {
-                            webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
-                        } else {
-                            voiceError("没有识别到内容");
-                        }
-                    });
-                }
-                @Override public void onError(int error) {
-                    final String msg = voiceErrorText(error);
-                    runOnUiThread(() -> voiceError(msg));
-                }
-                @Override public void onReadyForSpeech(Bundle params) {}
-                @Override public void onBeginningOfSpeech() {}
-                @Override public void onRmsChanged(float rmsdB) {}
-                @Override public void onBufferReceived(byte[] buffer) {}
-                @Override public void onEndOfSpeech() {}
-                @Override public void onPartialResults(Bundle partialResults) {}
-                @Override public void onEvent(int eventType, Bundle params) {}
-            });
-        }
-        if (recognizerIntent == null) {
-            recognizerIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            recognizerIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
-            recognizerIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-            // 注意：不加 EXTRA_PARTIAL_RESULTS，部分引擎不支持会导致 ERROR_CLIENT
+    private RecognitionListener makeListener() {
+        return new RecognitionListener() {
+            @Override public void onResults(Bundle results) {
+                ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                final String text = (matches != null && !matches.isEmpty()) ? matches.get(0) : "";
+                runOnUiThread(() -> {
+                    if (!text.trim().isEmpty()) {
+                        webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
+                    } else {
+                        voiceError("没有识别到内容");
+                    }
+                });
+            }
+            @Override public void onError(int error) {
+                final String msg = voiceErrorText(error);
+                runOnUiThread(() -> voiceError(msg));
+            }
+            @Override public void onReadyForSpeech(Bundle params) {}
+            @Override public void onBeginningOfSpeech() {}
+            @Override public void onRmsChanged(float rmsdB) {}
+            @Override public void onBufferReceived(byte[] buffer) {}
+            @Override public void onEndOfSpeech() {}
+            @Override public void onPartialResults(Bundle partialResults) {}
+            @Override public void onEvent(int eventType, Bundle params) {}
+        };
+    }
+
+    private void destroyRecognizer() {
+        if (speechRecognizer != null) {
+            try { speechRecognizer.cancel(); } catch (Exception e) {}
+            try { speechRecognizer.destroy(); } catch (Exception e) {}
+            speechRecognizer = null;
         }
     }
 
@@ -225,7 +237,7 @@ public class MainActivity extends AppCompatActivity {
     private String voiceErrorText(int error) {
         switch (error) {
             case SpeechRecognizer.ERROR_AUDIO: return "录音失败（麦克风不可用）";
-            case SpeechRecognizer.ERROR_CLIENT: return "语音识别客户端错误（错误码 " + error + "）";
+            case SpeechRecognizer.ERROR_CLIENT: return "语音识别客户端错误（错误码 " + error + "）" + recognitionServiceHint();
             case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: return "没有麦克风权限";
             case SpeechRecognizer.ERROR_NETWORK: return "网络连接失败";
             case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: return "网络超时";
@@ -241,6 +253,15 @@ public class MainActivity extends AppCompatActivity {
     private void voiceError(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
         webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError(" + jsonQuote(msg) + ");", null);
+    }
+
+    /** 读取设备默认语音识别服务名，附在 ERROR_CLIENT 后便于定位。 */
+    private String recognitionServiceHint() {
+        try {
+            String svc = android.provider.Settings.Secure.getString(getContentResolver(), "voice_recognition_service");
+            if (svc != null && !svc.isEmpty()) return "；当前识别服务：" + svc;
+        } catch (Exception ignored) {}
+        return "";
     }
 
     private void openGallery(String title, int requestCode) {
@@ -412,11 +433,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        if (speechRecognizer != null) {
-            try { speechRecognizer.cancel(); } catch (Exception e) {}
-            try { speechRecognizer.destroy(); } catch (Exception e) {}
-            speechRecognizer = null;
-        }
+        destroyRecognizer();
         super.onDestroy();
     }
 }
