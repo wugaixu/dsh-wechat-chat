@@ -635,6 +635,8 @@ const CLOUDFLARED_BIN = join(home, 'wechat-chat', process.platform === 'win32' ?
 
 // 隧道自检路径：登录页始终无需凭据即可访问，用它判断公网地址是否真的可达。
 const TUNNEL_PROBE_PATH = '/__whale/login'
+// 持续不可达超过该时长才重建隧道（重建会换地址，尽量少换）。
+const TUNNEL_REBUILD_AFTER_MS = 120_000
 
 async function ensureCloudflaredBin(cf) {
   if (!existsSync(CLOUDFLARED_BIN)) {
@@ -659,6 +661,7 @@ export class TunnelManager {
     this.error = undefined
     this.healthy = false
     this.probeFailures = 0
+    this.unhealthySince = undefined
     this.probeTimer = undefined
     this.handle = undefined
     this.timers = []
@@ -685,7 +688,8 @@ export class TunnelManager {
   async probe() {
     if (this.url === undefined) return false
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 8_000)
+    // 本机到 Cloudflare 边缘可能经代理而偏慢，超时给足以免误判为隧道故障。
+    const timer = setTimeout(() => controller.abort(), 15_000)
     try {
       const res = await fetch(`${this.url}${TUNNEL_PROBE_PATH}`, {
         redirect: 'manual',
@@ -711,14 +715,18 @@ export class TunnelManager {
     if (this.stopping || this.phase !== 'running') return
     if (ok) {
       this.probeFailures = 0
+      this.unhealthySince = undefined
       if (!this.healthy) { this.healthy = true; this.emit() }
       this.scheduleProbe(30_000)
       return
     }
     this.probeFailures += 1
     if (this.healthy) { this.healthy = false; this.emit() }
-    if (this.probeFailures >= 3) {
-      this.fail('公网隧道自检失败，正在重建')
+    if (this.unhealthySince === undefined) this.unhealthySince = Date.now()
+    // cloudflared 自己会重连边缘；只要进程还活着就尽量复用同一个公网地址，
+    // 避免频繁重建导致地址变化、手机需要反复重新扫码。
+    if (Date.now() - this.unhealthySince >= TUNNEL_REBUILD_AFTER_MS) {
+      this.fail('公网隧道长时间不可达，正在重建')
       return
     }
     this.scheduleProbe(5_000)
@@ -745,6 +753,7 @@ export class TunnelManager {
     this.error = undefined
     this.healthy = false
     this.probeFailures = 0
+    this.unhealthySince = undefined
     this.setPhase('stopped')
   }
 
@@ -771,6 +780,7 @@ export class TunnelManager {
         this.error = undefined
         this.healthy = false
         this.probeFailures = 0
+        this.unhealthySince = undefined
         this.setPhase('running')
         this.scheduleProbe(1_500)
       })
@@ -795,6 +805,7 @@ export class TunnelManager {
     this.error = message
     this.healthy = false
     this.probeFailures = 0
+    this.unhealthySince = undefined
     clearTimeout(this.probeTimer)
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }

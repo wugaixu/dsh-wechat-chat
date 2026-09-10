@@ -79,26 +79,48 @@ test('info exposes health only once a public url exists', async () => {
   assert.deepEqual(manager.info(), { phase: 'stopped' })
 })
 
-test('probe marks the tunnel unhealthy after repeated failures and rebuilds', async () => {
-  const { server, url } = await listen((req, res) => {
-    res.writeHead(530)
-    res.end('error 1033')
-  })
-  try {
-    const manager = new TunnelManager('http://127.0.0.1:1')
-    let failures = 0
-    manager.fail = () => { failures += 1 }
-    manager.scheduleProbe = () => {} // 测试中不排定后台定时器
-    manager.url = url
-    manager.phase = 'running'
-    manager.healthy = true
-    // 连做三次失败探测：前两次只置为不健康，第三次触发重建。
-    manager.probe = async () => false
-    for (let i = 0; i < 3; i += 1) await manager.runProbe()
-    assert.equal(manager.healthy, false)
-    assert.equal(failures, 1)
-    assert.equal(manager.probeFailures, 3)
-  } finally {
-    server.close()
-  }
+test('repeated probe failures keep the same tunnel instead of churning the url', async () => {
+  const manager = new TunnelManager('http://127.0.0.1:1')
+  let rebuilds = 0
+  manager.fail = () => { rebuilds += 1 }
+  manager.scheduleProbe = () => {} // 测试中不排定后台定时器
+  manager.url = 'https://stable-name.trycloudflare.com'
+  manager.phase = 'running'
+  manager.healthy = true
+  manager.probe = async () => false
+  for (let i = 0; i < 10; i += 1) await manager.runProbe()
+  assert.equal(manager.healthy, false, 'marked unhealthy')
+  assert.equal(rebuilds, 0, 'still within the rebuild grace window: url stays stable')
+  assert.equal(manager.url, 'https://stable-name.trycloudflare.com', 'address is reused')
+  assert.equal(manager.probeFailures, 10)
+})
+
+test('a long outage eventually rebuilds the tunnel', async () => {
+  const manager = new TunnelManager('http://127.0.0.1:1')
+  let rebuilds = 0
+  manager.fail = () => { rebuilds += 1 }
+  manager.scheduleProbe = () => {}
+  manager.url = 'https://stuck-name.trycloudflare.com'
+  manager.phase = 'running'
+  manager.healthy = true
+  manager.unhealthySince = Date.now() - 121_000 // 已持续不可达超过阈值
+  manager.probe = async () => false
+  await manager.runProbe()
+  assert.equal(rebuilds, 1)
+  assert.equal(manager.healthy, false)
+})
+
+test('a recovered probe restores health without changing the address', async () => {
+  const manager = new TunnelManager('http://127.0.0.1:1')
+  manager.scheduleProbe = () => {}
+  manager.url = 'https://recovers.trycloudflare.com'
+  manager.phase = 'running'
+  manager.healthy = false
+  manager.unhealthySince = Date.now() - 60_000
+  manager.probe = async () => true
+  await manager.runProbe()
+  assert.equal(manager.healthy, true)
+  assert.equal(manager.unhealthySince, undefined, 'grace timer cleared after recovery')
+  assert.equal(manager.probeFailures, 0)
+  assert.equal(manager.url, 'https://recovers.trycloudflare.com', 'same address reused, no re-scan needed')
 })
