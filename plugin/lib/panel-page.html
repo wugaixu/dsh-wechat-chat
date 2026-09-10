@@ -240,11 +240,18 @@ __QRCODE_LIB__
         var t = r.tunnel || {};
         var wasRunning = tunnelRunning;
         if (t.phase === 'running' && t.url) {
-          tunnelRunning = true;
-          tunEl.textContent = '公网隧道已连接 ' + t.url;
-          tunEl.className = '';
-          // 隧道刚就绪（或刚打开面板）就自动出码
-          if (!wasRunning && !hasQr) refresh();
+          if (t.healthy !== true) {
+            // 已拿到地址但公网自检未通过：不自动出码，避免手机扫到 Cloudflare 1033 死链
+            tunnelRunning = false;
+            tunEl.textContent = '公网隧道正在自检连通性… ' + t.url;
+            tunEl.className = '';
+          } else {
+            tunnelRunning = true;
+            tunEl.textContent = '公网隧道已连接（自检通过） ' + t.url;
+            tunEl.className = '';
+            // 隧道刚就绪（或刚打开面板）就自动出码
+            if (!wasRunning && !hasQr) refresh();
+          }
         } else if (t.phase === 'starting') {
           tunnelRunning = false;
           tunEl.textContent = '公网隧道连接中…';

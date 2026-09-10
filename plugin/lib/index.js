@@ -633,6 +633,9 @@ async function loadCloudflared() {
 // cloudflared 二进制放到 node_modules 之外运行，避免 pnpm 重装插件时锁文件
 const CLOUDFLARED_BIN = join(home, 'wechat-chat', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')
 
+// 隧道自检路径：登录页始终无需凭据即可访问，用它判断公网地址是否真的可达。
+const TUNNEL_PROBE_PATH = '/__whale/login'
+
 async function ensureCloudflaredBin(cf) {
   if (!existsSync(CLOUDFLARED_BIN)) {
     mkdirSync(dirname(CLOUDFLARED_BIN), { recursive: true })
@@ -648,12 +651,15 @@ async function ensureCloudflaredBin(cf) {
   return CLOUDFLARED_BIN
 }
 
-class TunnelManager {
+export class TunnelManager {
   constructor(target) {
     this.target = target
     this.phase = 'stopped'
     this.url = undefined
     this.error = undefined
+    this.healthy = false
+    this.probeFailures = 0
+    this.probeTimer = undefined
     this.handle = undefined
     this.timers = []
     this.generation = 0
@@ -670,8 +676,52 @@ class TunnelManager {
     return {
       phase: this.phase,
       ...(this.url !== undefined ? { url: this.url } : {}),
+      ...(this.url !== undefined ? { healthy: this.healthy } : {}),
       ...(this.error !== undefined ? { error: this.error } : {}),
     }
+  }
+
+  /** 从公网侧探测隧道是否真的可达（Cloudflare 边缘返回 5xx 即视为不可用）。 */
+  async probe() {
+    if (this.url === undefined) return false
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 8_000)
+    try {
+      const res = await fetch(`${this.url}${TUNNEL_PROBE_PATH}`, {
+        redirect: 'manual',
+        signal: controller.signal,
+        headers: { 'user-agent': 'dsh-wechat-chat-health' },
+      })
+      return res.status > 0 && res.status < 500
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  scheduleProbe(delayMs) {
+    clearTimeout(this.probeTimer)
+    this.probeTimer = setTimeout(() => { void this.runProbe() }, delayMs)
+  }
+
+  async runProbe() {
+    if (this.stopping || this.phase !== 'running' || this.url === undefined) return
+    const ok = await this.probe()
+    if (this.stopping || this.phase !== 'running') return
+    if (ok) {
+      this.probeFailures = 0
+      if (!this.healthy) { this.healthy = true; this.emit() }
+      this.scheduleProbe(30_000)
+      return
+    }
+    this.probeFailures += 1
+    if (this.healthy) { this.healthy = false; this.emit() }
+    if (this.probeFailures >= 3) {
+      this.fail('公网隧道自检失败，正在重建')
+      return
+    }
+    this.scheduleProbe(5_000)
   }
 
   emit() {
@@ -693,6 +743,8 @@ class TunnelManager {
     this.teardown()
     this.url = undefined
     this.error = undefined
+    this.healthy = false
+    this.probeFailures = 0
     this.setPhase('stopped')
   }
 
@@ -717,7 +769,10 @@ class TunnelManager {
         clearTimeout(urlTimer)
         this.url = value
         this.error = undefined
+        this.healthy = false
+        this.probeFailures = 0
         this.setPhase('running')
+        this.scheduleProbe(1_500)
       })
       handle.on('exit', () => {
         if (this.handle !== handle) return
@@ -738,6 +793,9 @@ class TunnelManager {
     if (this.stopping) return
     this.url = undefined
     this.error = message
+    this.healthy = false
+    this.probeFailures = 0
+    clearTimeout(this.probeTimer)
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }
       this.handle = undefined
@@ -753,6 +811,8 @@ class TunnelManager {
     this.stopping = true
     for (const t of this.timers) clearTimeout(t)
     this.timers = []
+    clearTimeout(this.probeTimer)
+    this.probeTimer = undefined
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }
       this.handle = undefined
@@ -1220,6 +1280,11 @@ export function apply(ctx, config = {}) {
       const base = (autoTunnel && tunnelBase !== undefined) ? tunnelBase : (publicBaseUrl || undefined)
       if (base === undefined) {
         writeJson(res, 409, { ok: false, code: 'lan-required', error: '公网隧道未就绪或未配置公网地址' })
+        return
+      }
+      // 隧道自检未通过时不签发二维码，避免手机扫到返回 Cloudflare 1033 的死链。
+      if (base === tunnelBase && !tunnel.healthy) {
+        writeJson(res, 409, { ok: false, code: 'tunnel-unhealthy', error: '公网隧道正在自检连通性，请稍候几秒后再刷新二维码', tunnel: tunnel.info() })
         return
       }
       const { token, expiresAt } = service.issue()

@@ -187,7 +187,13 @@ outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
 - The free tunnel changes address on every dsh-web restart (trycloudflare quick
   tunnel behavior): re-scan the QR once after a restart (scanning updates the
   server address and re-pairs); LAN use is unaffected.
-- Plain-HTTP LAN install/use works (the app allows cleartext traffic).
+- A tunnel address alone is not enough: the plugin self-checks that address from the
+  public side (it fetches the login page) and only issues a QR code **after the check
+  passes**, so the phone can never land on a Cloudflare 1033 error page. Three
+  consecutive failures rebuild the tunnel; meanwhile the panel shows "checking
+  connectivity".
+- Plain-HTTP LAN install/use works (the app allows cleartext traffic); voice upload
+  still requires HTTPS to prevent eavesdropping.
 
 ## Security
 
