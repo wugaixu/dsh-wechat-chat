@@ -46,6 +46,7 @@
   .row { display:flex; gap:10px; justify-content:center; margin-top:12px; }
   .btn { height:38px; padding:0 16px; border:none; border-radius:10px; font-size:14px; cursor:pointer; }
   .btn.primary { background:#07c160; color:#fff; font-weight:600; }
+  .btn.plain { background:#eee; color:#333; }
   .btn.danger { background:#fdecea; color:#d0392b; }
   .btn:active { opacity:.8; }
   #msg { margin-top:12px; font-size:12px; color:#8a8a8a; min-height:16px; }
@@ -115,6 +116,8 @@ __QRCODE_LIB__
   var sttCancel = document.getElementById('sttCancel');
   var tunnelRunning = false;
   var hasQr = false;
+  var qrOrigin = null;   // 当前二维码所对应的隧道地址
+  var refreshing = false;
 
   function setMsg(text, isErr) {
     msg.textContent = text;
@@ -213,6 +216,8 @@ __QRCODE_LIB__
 
   function refresh() {
     if (!tunnelRunning) { setMsg('公网隧道尚未就绪，请稍候…', true); return; }
+    if (refreshing) return;
+    refreshing = true;
     setMsg('正在生成二维码…');
     fetch('/api/whale/pair/issue', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
       .then(function (r) { return r.json(); })
@@ -220,15 +225,19 @@ __QRCODE_LIB__
         if (r && r.ok === true) {
           renderQR(r.url);
           link.value = r.url;
+          qrOrigin = (r.tunnel && r.tunnel.url) || null;
           var mins = Math.max(1, Math.round((r.expiresAt - Date.now()) / 60000));
           setMsg('二维码有效 ' + mins + ' 分钟，等待手机扫码…');
         } else {
           document.getElementById('qr').innerHTML = '';
           link.value = '';
+          qrOrigin = null;
+          hasQr = false;
           setMsg((r && r.error) || '无法生成二维码', true);
         }
       })
-      .catch(function () { setMsg('请求失败', true); });
+      .catch(function () { setMsg('请求失败', true); })
+      .then(function () { refreshing = false; });
   }
   window.refresh = refresh;
 
@@ -238,19 +247,26 @@ __QRCODE_LIB__
       .then(function (r) {
         if (!r || r.ok !== true) { tunEl.textContent = '服务不可用'; tunEl.className = 'err'; return; }
         var t = r.tunnel || {};
-        var wasRunning = tunnelRunning;
         if (t.phase === 'running' && t.url) {
-          if (t.healthy !== true) {
-            // 已拿到地址但公网自检未通过：不自动出码，避免手机扫到 Cloudflare 1033 死链
+          if (t.connected !== true) {
+            // 连接器还没注册到 Cloudflare 边缘，此时出码手机连不上
             tunnelRunning = false;
-            tunEl.textContent = '公网隧道正在自检连通性… ' + t.url;
+            tunEl.textContent = '公网隧道正在连接 Cloudflare… ' + t.url;
             tunEl.className = '';
           } else {
             tunnelRunning = true;
-            tunEl.textContent = '公网隧道已连接（自检通过） ' + t.url;
+            tunEl.textContent = '公网隧道已连接 ' + t.url;
             tunEl.className = '';
-            // 隧道刚就绪（或刚打开面板）就自动出码
-            if (!wasRunning && !hasQr) refresh();
+            // 隧道地址一变，旧二维码立刻作废——否则手机扫的是已消失的旧地址，
+            // 只会看到 Cloudflare 错误页，服务端也不会有任何请求记录。
+            if (qrOrigin !== null && qrOrigin !== t.url) {
+              document.getElementById('qr').innerHTML = '';
+              link.value = '';
+              hasQr = false;
+              qrOrigin = null;
+              setMsg('公网隧道地址已变化，正在生成新二维码…');
+            }
+            if (!hasQr) refresh();
           }
         } else if (t.phase === 'starting') {
           tunnelRunning = false;
@@ -287,6 +303,7 @@ __QRCODE_LIB__
         document.getElementById('qr').innerHTML = '';
         link.value = '';
         hasQr = false;
+        qrOrigin = null;
         setMsg('已断开全部设备。点击「刷新二维码」重新开启');
       })
       .catch(function () { setMsg('操作失败', true); });

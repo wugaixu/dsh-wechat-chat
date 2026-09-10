@@ -79,8 +79,17 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean voiceStopRequested = false;
     private volatile boolean voiceCancelled = false;
     private boolean voiceHoldActive = false;
+    private boolean voiceCancelZone = false;
     private boolean pendingVoicePermission = false;
     private int voiceGeneration = 0;
+    // DNS 被运营商污染时会间歇性 NXDOMAIN；对可恢复错误自动重试，别立刻放弃。
+    private static final int LOAD_MAX_RETRIES = 6;
+    // 启动时加载的是"上次保存的地址"，dsh 重启后该隧道已不存在，重试无意义：少量重试后直接回落扫码页
+    private static final int LOAD_MAX_RETRIES_STARTUP = 2;
+    private int loadRetries = 0;
+    private boolean loadFromScan = false;
+    private boolean loadHadError = false;
+    private String lastLoadUrl = null;
     private String voiceDeviceId = "";
     private String voiceOrigin = "";
     private String voiceCookie = "";
@@ -105,30 +114,37 @@ public class MainActivity extends AppCompatActivity {
         webView = findViewById(R.id.webview);
         nativeVoiceButton = findViewById(R.id.native_voice_button);
         nativeVoiceButton.setOnTouchListener((view, event) -> {
-            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
-                view.setBackgroundColor(0xffd8d8d8);
-                startVoiceRecognition();
-                return true;
+            switch (event.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    view.setBackgroundColor(0xFFD8D8D8);
+                    voiceCancelZone = false;
+                    startVoiceRecognition();
+                    return true;
+                case android.view.MotionEvent.ACTION_MOVE: {
+                    // 微信式上滑取消：进入取消区只是高亮提示，松手时才真正取消
+                    boolean nowCancel = event.getY() < -80;
+                    if (nowCancel != voiceCancelZone) {
+                        voiceCancelZone = nowCancel;
+                        view.setBackgroundColor(nowCancel ? 0xFFF3D3CF : 0xFFD8D8D8);
+                        runJs("window.wechatVoiceDrag && window.wechatVoiceDrag(" + (nowCancel ? "true" : "false") + ");");
+                    }
+                    return true;
+                }
+                case android.view.MotionEvent.ACTION_UP:
+                    view.setBackgroundColor(0xFFF5F5F5);
+                    voiceHoldActive = false;
+                    if (voiceCancelZone) { voiceCancelZone = false; cancelVoiceRecognition(); }
+                    else { voiceCancelZone = false; stopVoiceRecognition(); }
+                    return true;
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    view.setBackgroundColor(0xFFF5F5F5);
+                    voiceHoldActive = false;
+                    voiceCancelZone = false;
+                    cancelVoiceRecognition();
+                    return true;
+                default:
+                    return true;
             }
-            if (event.getAction() == android.view.MotionEvent.ACTION_MOVE && event.getY() < -80) {
-                view.setBackgroundColor(0xfff5f5f5);
-                voiceHoldActive = false;
-                cancelVoiceRecognition();
-                return true;
-            }
-            if (event.getAction() == android.view.MotionEvent.ACTION_UP) {
-                view.setBackgroundColor(0xfff5f5f5);
-                voiceHoldActive = false;
-                stopVoiceRecognition();
-                return true;
-            }
-            if (event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
-                view.setBackgroundColor(0xfff5f5f5);
-                voiceHoldActive = false;
-                cancelVoiceRecognition();
-                return true;
-            }
-            return true;
         });
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -146,25 +162,52 @@ public class MainActivity extends AppCompatActivity {
                 String saved = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", "");
                 String target = normalizedOrigin(uri.toString());
                 if (!saved.isEmpty() && saved.equals(target)) return false;
-                Toast.makeText(MainActivity.this, "已阻止跳转到非配对地址", Toast.LENGTH_SHORT).show();
                 return true;
             }
 
             @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                lastLoadUrl = url;
+                loadHadError = false;
+            }
+
+            @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) backToFirstRun();
+                if (!request.isForMainFrame()) return;
+                loadHadError = true;
+                int code = error.getErrorCode();
+                int limit = loadFromScan ? LOAD_MAX_RETRIES : LOAD_MAX_RETRIES_STARTUP;
+                // 运营商 DNS 对个别域名会间歇性解析失败（NXDOMAIN），重试往往即可通过
+                if (isRetriableLoadError(code) && loadRetries < limit && lastLoadUrl != null) {
+                    loadRetries += 1;
+                    final String retryUrl = lastLoadUrl;
+                    webView.postDelayed(() -> { if (lastLoadUrl != null) webView.loadUrl(retryUrl); }, 1500);
+                    return;
+                }
+                if (code == WebViewClient.ERROR_HOST_LOOKUP) {
+                    Toast.makeText(MainActivity.this, "该地址已失效，请重新扫码配对", Toast.LENGTH_LONG).show();
+                } else {
+                    Toast.makeText(MainActivity.this, "连接失败：" + error.getDescription(), Toast.LENGTH_LONG).show();
+                }
+                backToFirstRun();
             }
 
             @Override
             public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
-                if (request.isForMainFrame() && errorResponse.getStatusCode() >= 400) backToFirstRun();
+                if (!request.isForMainFrame() || errorResponse.getStatusCode() < 400) return;
+                loadHadError = true;
+                Toast.makeText(MainActivity.this, "服务器返回 HTTP " + errorResponse.getStatusCode(), Toast.LENGTH_LONG).show();
+                backToFirstRun();
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                if (url.startsWith("file://")) { nativeVoiceButton.setVisibility(android.view.View.GONE); return; }
+                // 只有真正加载成功才清零重试计数：失败时 WebView 也会回调这里，
+                // 若无条件清零会导致"失败→清零→重试"死循环，永远回不到扫码页。
+                if (!loadHadError) { loadRetries = 0; loadFromScan = false; }
                 // 进入远程页后清空历史：返回键直接退出，不再回到引导页
-                if (!url.startsWith("file://")) view.clearHistory();
-                else nativeVoiceButton.setVisibility(android.view.View.GONE);
+                view.clearHistory();
             }
         });
         webView.setWebChromeClient(new WebChromeClient());
@@ -175,13 +218,20 @@ public class MainActivity extends AppCompatActivity {
         if (origin == null || origin.isEmpty()) {
             webView.loadUrl("file:///android_asset/firstrun.html");
         } else {
-            // 已配对：直接进聊天页（加载失败再由 onReceivedError 兜底回引导页）
+            // 已配对：直接进聊天页。这是"上次保存的地址"，dsh 重启后隧道已换地址会解析失败，
+            // 因此只做少量重试便回落到扫码页。
+            loadFromScan = false;
+            loadRetries = 0;
             webView.loadUrl(origin + "/wechat?client=" + clientId());
         }
     }
 
     /** 页面加载失败（公网地址失效/网络不可达）时回到引导页重新扫码。 */
     private void backToFirstRun() {
+        loadRetries = 0;
+        loadFromScan = false;
+        loadHadError = false;
+        lastLoadUrl = null;
         getSharedPreferences("dsh_wechat", MODE_PRIVATE).edit().remove("origin").apply();
         webView.loadUrl("file:///android_asset/firstrun.html");
     }
@@ -329,20 +379,20 @@ public class MainActivity extends AppCompatActivity {
 
     private void uploadVoice(byte[] wav, int generation) {
         try {
-            String url = voiceOrigin + "/api/wechat/voice/transcribe?client=" + Uri.encode(clientId());
+            String url = voiceOrigin + "/api/wechat/voice/send?client=" + Uri.encode(clientId());
             RequestBody body = RequestBody.create(wav, MediaType.get("audio/wav"));
             Request.Builder builder = new Request.Builder().url(url).post(body).header("Accept", "application/json");
             if (voiceCookie != null && !voiceCookie.isEmpty()) builder.header("Cookie", voiceCookie);
             if (!voiceDeviceId.isEmpty()) builder.header("x-whale-device", voiceDeviceId);
             Call call = voiceHttp.newCall(builder.build());
             voiceUploadCall = call;
-            voiceProgress("transcribing", 100, "录音已发送，电脑正在离线识别…");
+            voiceProgress("uploading", 60, "正在发送语音…");
             call.enqueue(new Callback() {
                 @Override public void onFailure(@NonNull Call call, @NonNull IOException e) {
                     runOnUiThread(() -> {
                         if (generation != voiceGeneration || voiceCancelled) return;
                         voiceUploadCall = null;
-                        voiceError("语音上传失败：" + safeMessage(e));
+                        voiceError("语音发送失败：" + safeMessage(e));
                     });
                 }
                 @Override public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
@@ -355,9 +405,10 @@ public class MainActivity extends AppCompatActivity {
                         try {
                             JSONObject json = new JSONObject(raw);
                             if (status >= 200 && status < 300 && json.optBoolean("ok", false)) {
-                                finishVoice(json.optString("text", ""));
+                                // 语音条已在服务器落盘：交给页面插入气泡并轮询识别状态
+                                finishVoiceSent(json.optString("id", ""), json.optInt("durationMs", 0));
                             } else {
-                                String msg = json.optString("error", status == 503 ? "请先在电脑配对面板安装离线语音模型" : "语音识别失败");
+                                String msg = json.optString("error", status == 503 ? "请先在电脑配对面板安装离线语音模型" : "语音发送失败");
                                 voiceError(msg);
                             }
                         } catch (Exception e) {
@@ -367,7 +418,7 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         } catch (Exception e) {
-            runOnUiThread(() -> voiceError("无法上传语音：" + safeMessage(e)));
+            runOnUiThread(() -> voiceError("无法发送语音：" + safeMessage(e)));
         }
     }
 
@@ -395,12 +446,19 @@ public class MainActivity extends AppCompatActivity {
                 + jsonQuote(stage) + "," + percent + "," + jsonQuote(message) + ");", null));
     }
 
-    private void finishVoice(String text) {
-        if (!voiceRunning || voiceCancelled) return;
+    /** 在页面里执行一段 JS（仅用于语音相关的 UI 回调）。 */
+    private void runJs(String script) {
+        runOnUiThread(() -> webView.evaluateJavascript(script, null));
+    }
+
+    /** 语音条已上传成功：让页面立刻插入气泡，后续识别状态由页面轮询。 */
+    private void finishVoiceSent(String voiceId, int durationMs) {
+        if (voiceCancelled) return;
         voiceRunning = false;
         voiceStopRequested = true;
-        if (text == null || text.trim().isEmpty()) { voiceError("没有识别到内容"); return; }
-        webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
+        if (voiceId == null || voiceId.isEmpty()) { voiceError("语音发送失败"); return; }
+        webView.evaluateJavascript("window.wechatVoiceSent && window.wechatVoiceSent("
+                + jsonQuote(voiceId) + "," + durationMs + ");", null);
     }
 
     /** 上滑取消：终止录音或上传且不发送。 */
@@ -431,6 +489,14 @@ public class MainActivity extends AppCompatActivity {
 
     private static String safeMessage(Throwable error) {
         return error != null && error.getMessage() != null && !error.getMessage().isEmpty() ? error.getMessage() : "未知错误";
+    }
+
+    /** 这些错误通常是瞬时网络/DNS 问题，值得重试；HTTP 4xx 则不该重试。 */
+    private static boolean isRetriableLoadError(int errorCode) {
+        return errorCode == WebViewClient.ERROR_HOST_LOOKUP
+                || errorCode == WebViewClient.ERROR_CONNECT
+                || errorCode == WebViewClient.ERROR_TIMEOUT
+                || errorCode == WebViewClient.ERROR_IO;
     }
 
     private static String normalizedOrigin(String raw) {
@@ -538,6 +604,9 @@ public class MainActivity extends AppCompatActivity {
                 Toast.makeText(this, "二维码不是有效的 HTTP/HTTPS 鲸聊地址", Toast.LENGTH_LONG).show();
                 return;
             }
+            // 刚扫到的新配对链接：允许更多次重试（DNS 可能间歇失败）
+            loadFromScan = true;
+            loadRetries = 0;
             getSharedPreferences("dsh_wechat", MODE_PRIVATE).edit().putString("origin", pairedOrigin).apply();
             // 直接由原生加载配对链接（不依赖 JS 桥），并带上稳定客户端标识。
             final String withClient = scanned + (scanned.contains("?") ? "&" : "?") + "client=" + clientId();

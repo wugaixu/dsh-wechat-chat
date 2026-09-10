@@ -107,6 +107,56 @@
     display: flex; align-items: center; gap: 8px;
     color: var(--ink-2); font-size: 14px; background: var(--bubble-other);
   }
+
+  /* ── 语音条（微信样式）─────────────────── */
+  .vwrap { max-width: 72%; margin: 0 10px; display: flex; flex-direction: column; gap: 6px; }
+  .row.me .vwrap { align-items: flex-end; }
+  .vbubble {
+    position: relative; display: inline-flex; align-items: center; gap: 7px;
+    min-width: 74px; padding: 10px 13px; border-radius: 6px;
+    cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  .row.other .vbubble { background: var(--bubble-other); }
+  .row.me .vbubble { background: var(--bubble-me); }
+  .vbubble::after {
+    content: ""; position: absolute; top: 15px; width: 9px; height: 9px;
+    transform: rotate(45deg); z-index: -1;
+  }
+  .row.me .vbubble::after { right: -4px; background: var(--bubble-me); }
+  .row.other .vbubble::after { left: -4px; background: var(--bubble-other); }
+  .vbubble .vb-dur { font-size: 13px; color: #4a4a4a; font-variant-numeric: tabular-nums; }
+  .vbubble .vb-sound { width: 19px; height: 19px; color: #333; flex: none; }
+  .vbubble .vb-sound .arc { opacity: .35; }
+  .vbubble.playing .vb-sound .arc { animation: vbArc .9s infinite ease-in-out; opacity: 1; }
+  .vbubble.playing .vb-sound .arc2 { animation-delay: .18s; }
+  .vbubble.playing .vb-sound .arc3 { animation-delay: .36s; }
+  .vbubble.loading { opacity: .55; }
+  @keyframes vbArc { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
+  .vstatus { font-size: 11px; color: #a0a0a0; }
+  .vstatus.err { color: #d0392b; }
+  .vtext {
+    font-size: 15px; line-height: 1.5; color: #191919; white-space: pre-wrap; word-break: break-word;
+    background: #fff; border: 1px solid #e8e8e8; border-radius: 8px; padding: 9px 12px;
+    max-width: 100%;
+  }
+  .vtext[hidden] { display: none; }
+
+  /* ── 语音条操作菜单 ─────────────────────── */
+  #voiceSheetMask {
+    position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; z-index: 60;
+  }
+  #voiceSheetMask.show { display: block; }
+  #voiceSheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 61; background: #f7f7f7;
+    border-radius: 12px 12px 0 0; padding: 8px; display: none;
+  }
+  #voiceSheet.show { display: block; }
+  #voiceSheet button {
+    display: block; width: 100%; height: 50px; margin: 0 0 6px; border: 0; border-radius: 9px;
+    background: #fff; font-size: 16px; color: #191919;
+  }
+  #voiceSheet button.cancel { background: #ededed; margin-bottom: 0; }
+  #voiceSheet button.danger { color: #d0392b; }
   .dots { display: inline-flex; gap: 4px; align-items: center; }
   .dots i {
     width: 6px; height: 6px; border-radius: 50%; background: #b8b8b8;
@@ -126,49 +176,49 @@
   .toast.show { opacity: 1; }
 
   /* ── 语音识别中提示 ─────────────────────── */
+  /* ── 录音浮层（微信样式）────────────────── */
   .voice-hint {
-    position: fixed; left: 50%; top: 50%;
-    transform: translate(-50%, -50%);
-    z-index: 55;
-    display: flex; flex-direction: column; align-items: center; gap: 14px;
-    background: rgba(0,0,0,.72); color: #fff;
-    padding: 18px 26px; border-radius: 12px;
-    opacity: 0; pointer-events: none;
-    transition: opacity .2s;
+    position: fixed; inset: 0; z-index: 55;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none;
   }
-  .voice-hint.show { opacity: 1; }
+  .voice-hint.show { display: flex; }
+  .voice-hint .vh-state {
+    margin-bottom: 16px; padding: 7px 18px; border-radius: 20px;
+    background: rgba(0,0,0,.66); color: #fff; font-size: 14px; line-height: 1.2;
+  }
   .voice-hint .mic {
-    position: relative; width: 44px; height: 44px;
+    position: relative; width: 152px; height: 152px; border-radius: 20px;
+    background: rgba(0,0,0,.66);
     display: flex; align-items: center; justify-content: center;
+    transition: background .15s;
   }
-  .voice-hint .mic svg { width: 26px; height: 26px; color: #fff; }
-  .voice-hint .mic::before, .voice-hint .mic::after {
-    content: ""; position: absolute; inset: 0; border-radius: 50%;
-    border: 2px solid rgba(7,193,96,.9);
-    animation: mic-pulse 1.4s ease-out infinite;
+  .voice-hint .mic svg { width: 44px; height: 44px; color: #fff; }
+  .voice-hint .waves {
+    position: absolute; bottom: 20px; left: 0; right: 0;
+    display: flex; align-items: flex-end; justify-content: center; gap: 4px; height: 20px;
   }
-  .voice-hint .mic::after { animation-delay: .7s; }
-  @keyframes mic-pulse {
-    0% { transform: scale(1); opacity: 1; }
-    100% { transform: scale(2.2); opacity: 0; }
+  .voice-hint .waves i {
+    width: 4px; height: 6px; border-radius: 2px; background: rgba(255,255,255,.9);
+    animation: vhwave .9s infinite ease-in-out;
   }
-  .voice-hint .label { font-size: 14px; }
-  .voice-hint .text {
-    max-width: 220px; font-size: 16px; line-height: 1.4;
-    max-height: 84px; overflow: hidden; text-align: center;
-    word-break: break-all; color: #fff;
+  .voice-hint .waves i:nth-child(2) { animation-delay: .1s; }
+  .voice-hint .waves i:nth-child(3) { animation-delay: .2s; }
+  .voice-hint .waves i:nth-child(4) { animation-delay: .3s; }
+  .voice-hint .waves i:nth-child(5) { animation-delay: .4s; }
+  .voice-hint .waves i:nth-child(6) { animation-delay: .5s; }
+  @keyframes vhwave { 0%,100% { height: 6px; } 50% { height: 18px; } }
+  .voice-hint .vh-tip {
+    margin-top: 20px; display: flex; align-items: center; gap: 5px;
+    font-size: 13px; color: #d8d8d8;
   }
-  .voice-hint .text:empty { display: none; }
-  .voice-hint .cancel-hint {
-    display: flex; align-items: center; gap: 4px;
-    font-size: 12px; color: #c0c0c0;
-  }
-  .voice-hint .cancel-hint svg { width: 14px; height: 14px; color: #c0c0c0; }
-  .voice-hint.cancelling .mic::before,
-  .voice-hint.cancelling .mic::after { border-color: rgba(255,69,58,.9); }
-  .voice-hint.cancelling .label { color: #ff453a; }
-  .voice-hint.cancelling .cancel-hint,
-  .voice-hint.cancelling .cancel-hint svg { color: #ff453a; }
+  .voice-hint .vh-tip svg { width: 15px; height: 15px; color: #d8d8d8; }
+  /* 取消区：浮层变红并提示松手取消 */
+  .voice-hint.cancelling .mic { background: rgba(214,60,50,.94); }
+  .voice-hint.cancelling .vh-state { background: rgba(214,60,50,.94); }
+  .voice-hint.cancelling .vh-tip,
+  .voice-hint.cancelling .vh-tip svg { color: #ff8a80; }
+  .voice-hint .text { display: none; }
 
   /* ── 头像菜单（底部弹层） ───────────────── */
   .avatar-mask { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 60; display: none; }
@@ -312,19 +362,20 @@
   <div class="toast" id="toast"></div>
 
   <div class="voice-hint" id="voiceHint">
+    <div class="vh-state" id="voiceHintLabel">松开 发送</div>
     <div class="mic">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="9" y="2" width="6" height="11" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/>
       </svg>
+      <div class="waves"><i></i><i></i><i></i><i></i><i></i><i></i></div>
     </div>
-    <span class="label" id="voiceHintLabel">正在识别，松开结束</span>
-    <div class="text" id="voiceHintText"></div>
-    <div class="cancel-hint" id="voiceCancelHint">
+    <div class="vh-tip" id="voiceCancelHint">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>
       </svg>
       <span id="voiceCancelHintText">上滑取消</span>
     </div>
+    <div class="text" id="voiceHintText"></div>
   </div>
 
   <div class="avatar-mask" id="avatarMask"></div>
@@ -335,8 +386,14 @@
     <div class="item cancel" id="avatarCancelItem">取消</div>
   </div>
 
-  <div class="nick-mask" id="nickMask"></div>
-  <div class="nick-dialog" id="nickDialog">
+  <div id="voiceSheetMask"></div>
+  <div id="voiceSheet">
+    <button id="voiceTextBtn">转文字</button>
+    <button id="voiceDeleteBtn" class="danger">删除</button>
+    <button id="voiceCancelBtn" class="cancel">取消</button>
+  </div>
+
+  <div class="nick-mask" id="nickMask"></div>  <div class="nick-dialog" id="nickDialog">
     <div class="nick-title">修改聊天对象名</div>
     <input id="nickInput" type="text" maxlength="30" placeholder="请输入名称">
     <div class="nick-btns">
@@ -812,11 +869,16 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
       showChat();
       if (s.background) applyBackground(s.background);
       (s.hiddenIds || []).forEach(function (id) { hiddenSet[id] = true; });
-      (s.history || []).forEach(function (m) {
-        if (m.id && hiddenSet[m.id]) return;
-        if (m.id) seenMsgIds[m.id] = true;
-        if (m.role === 'user') addRow('me', m.text, cfg.avatarMe, m.id);
-        else addAssistant(m.text, m.id);
+      bindVoiceHistory(s.history || []).then(function () {
+        (s.history || []).forEach(function (m) {
+          if (m.id && hiddenSet[m.id]) return;
+          if (m.id) seenMsgIds[m.id] = true;
+          // 语音产生的消息由语音条呈现，不再重复显示【语音】文本气泡
+          if (m.role === 'user' && typeof m.text === 'string' && m.text.indexOf('【语音】') === 0) return;
+          if (m.role === 'user') addRow('me', m.text, cfg.avatarMe, m.id);
+          else addAssistant(m.text, m.id);
+        });
+        flushVoiceRenders();
       });
       sttReady = !!(s.stt && s.stt.ready);
       if (s.busy) setStatus('正在思考');
@@ -840,6 +902,14 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     if (!m || !m.type) return;
     if (m.type === 'user') {
       if (m.id && hiddenSet[m.id]) return;
+      // 语音产生的文本由语音条表示：只回填语音条的 message id，不再插入文本气泡
+      if (typeof m.text === 'string' && m.text.indexOf('【语音】') === 0) {
+        if (!m.id || seenMsgIds[m.id]) return;
+        seenMsgIds[m.id] = true;
+        var vrow = pendingVoiceRow();
+        if (vrow) vrow.dataset.id = m.id;
+        return;
+      }
       if (m.id) {
         if (seenMsgIds[m.id]) return;
         seenMsgIds[m.id] = true;
@@ -974,12 +1044,20 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     voiceCancelling = on;
     if (on) {
       voiceHint.classList.add('cancelling');
-      voiceHintLabel.textContent = '松开取消';
+      voiceHintLabel.textContent = '松开手指，取消发送';
+      voiceCancelHintText.textContent = '取消发送';
     } else {
       voiceHint.classList.remove('cancelling');
-      voiceHintLabel.textContent = '正在识别，松开结束';
+      voiceHintLabel.textContent = '松开 发送';
+      voiceCancelHintText.textContent = '上滑取消';
     }
   }
+
+  /* 原生按钮拖动时回传是否进入取消区（微信式上滑取消） */
+  window.wechatVoiceDrag = function (cancelling) {
+    if (!voiceHint.classList.contains('show')) return;
+    setVoiceCancelling(!!cancelling);
+  };
 
   // 新 APK：原生按钮触控录音，JS 只负责显示/隐藏按钮和接收转写结果
   // 旧 APK 兼容：holdTalk 触控 + 旧桥接方法
@@ -1031,10 +1109,16 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
   }
 
   window.wechatVoiceProgress = function (stage, percent, message) {
+    if (stage === 'uploading') {
+      // 松手即出语音条，浮层立即收起（微信行为）
+      showVoiceHint(false);
+      setVoiceCancelling(false);
+      return;
+    }
     showVoiceHint(true);
-    if (stage === 'recording') voiceHintLabel.textContent = '正在录音，松开结束';
-    else if (stage === 'uploading') voiceHintLabel.textContent = '正在上传录音';
-    else if (stage === 'transcribing') voiceHintLabel.textContent = '电脑正在离线识别';
+    setVoiceCancelling(false);
+    if (stage === 'recording') voiceHintLabel.textContent = '松开 发送';
+    else if (stage === 'transcribing') voiceHintLabel.textContent = '正在识别…';
     voiceHintText.textContent = message || '';
   };
 
@@ -1062,6 +1146,238 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     showVoiceHint(false);
     toastText(msg || '语音识别失败');
   };
+
+  /* ── 语音条（微信式）─────────────────────
+     松手即发语音条；电脑后台识别并自动送入真实会话；长按菜单可看文字/删除。 */
+  var voiceRecords = {};      // id -> 记录
+  var voiceRows = {};         // id -> row 元素
+  var voiceAudio = null;      // 当前播放的 Audio
+  var voicePlayingId = null;
+  var voicePollTimer = null;
+
+  function fmtDuration(ms) {
+    var sec = Math.max(1, Math.round((Number(ms) || 0) / 1000));
+    return sec + '″';
+  }
+
+  function stopVoicePlayback() {
+    if (voiceAudio) { try { voiceAudio.pause(); } catch (e) {} voiceAudio = null; }
+    if (voicePlayingId && voiceRows[voicePlayingId]) {
+      var b = voiceRows[voicePlayingId].querySelector('.vbubble');
+      if (b) b.classList.remove('playing');
+    }
+    voicePlayingId = null;
+  }
+
+  function playVoice(id) {
+    if (voicePlayingId === id) { stopVoicePlayback(); return; }
+    stopVoicePlayback();
+    try {
+      voiceAudio = new Audio('/api/wechat/voice/' + encodeURIComponent(id));
+      voicePlayingId = id;
+      var row = voiceRows[id];
+      if (row) { var b = row.querySelector('.vbubble'); if (b) b.classList.add('playing'); }
+      voiceAudio.onended = stopVoicePlayback;
+      voiceAudio.onerror = function () { stopVoicePlayback(); toastText('该语音已过期或无法播放'); };
+      voiceAudio.play().catch(function () { stopVoicePlayback(); toastText('无法播放，请检查网络'); });
+    } catch (e) { stopVoicePlayback(); }
+  }
+
+  function renderVoiceStatus(row, rec) {
+    var bub = row.querySelector('.vbubble');
+    if (bub) bub.classList.toggle('loading', rec.status === 'pending');
+    var s = row.querySelector('.vstatus');
+    if (!s) return;
+    if (rec.status === 'pending') { s.textContent = '识别中…'; s.className = 'vstatus'; }
+    else if (rec.status === 'failed') { s.textContent = rec.error || '识别失败'; s.className = 'vstatus err'; }
+    else { s.textContent = ''; s.className = 'vstatus'; }
+  }
+
+  function setVoiceText(row, text) {
+    var box = row.querySelector('.vtext');
+    if (!box) return;
+    if (typeof text === 'string' && text !== '') { box.textContent = text; }
+    else { box.textContent = '（还没有识别结果）'; }
+  }
+
+  function toggleVoiceText(row) {
+    var box = row.querySelector('.vtext');
+    if (!box) return;
+    box.hidden = !box.hidden;
+  }
+
+  function addVoiceRow(rec, opts) {
+    opts = opts || {};
+    var row = document.createElement('div');
+    row.className = 'row me';
+    row.dataset.voiceId = rec.id;
+    if (opts.id) row.dataset.id = opts.id;
+
+    var av = document.createElement('div');
+    av.className = 'avatar';
+    if (cfg.avatarMe) av.style.backgroundImage = 'url("' + cfg.avatarMe + '")';
+
+    var wrap = document.createElement('div');
+    wrap.className = 'vwrap';
+
+    var bub = document.createElement('div');
+    bub.className = 'vbubble';
+    bub.innerHTML = '<span class="vb-dur">' + fmtDuration(rec.durationMs) + '</span>'
+      + '<svg class="vb-sound" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor" stroke="none"/>'
+      + '<path class="arc" d="M15.4 8.6a5 5 0 0 1 0 6.8"/>'
+      + '<path class="arc arc2" d="M18.4 5.8a9 9 0 0 1 0 12.4"/>'
+      + '</svg>';
+    bub.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (selectMode) { toggleSelect(row); return; }
+      playVoice(rec.id);
+    });
+
+    var statusEl = document.createElement('div');
+    statusEl.className = 'vstatus';
+
+    var textEl = document.createElement('div');
+    textEl.className = 'vtext';
+    textEl.hidden = true;
+
+    wrap.appendChild(bub); wrap.appendChild(statusEl); wrap.appendChild(textEl);
+    row.appendChild(av); row.appendChild(wrap);
+
+    // 长按语音条 → 操作菜单（转文字 / 删除 / 取消），不进入文字消息的多选删除
+    var timer = null, moved = false, sx = 0, sy = 0;
+    bub.addEventListener('touchstart', function (e) {
+      if (selectMode) return;
+      var t = e.changedTouches[0];
+      sx = t.clientX; sy = t.clientY; moved = false;
+      timer = setTimeout(function () { if (!moved) { row._lpAt = Date.now(); openVoiceSheet(row); } }, 500);
+    }, { passive: true });
+    bub.addEventListener('touchmove', function (e) {
+      var t = e.changedTouches[0];
+      if (Math.abs(t.clientX - sx) > 12 || Math.abs(t.clientY - sy) > 12) moved = true;
+    }, { passive: true });
+    bub.addEventListener('touchend', function () { clearTimeout(timer); }, { passive: true });
+    bub.addEventListener('touchcancel', function () { clearTimeout(timer); }, { passive: true });
+    bub.addEventListener('contextmenu', function (e) { e.preventDefault(); }, { passive: false });
+
+    row.addEventListener('click', function () { if (selectMode) toggleSelect(row); });
+
+    msgs.appendChild(row);
+    voiceRows[rec.id] = row;
+    if (rec.status) renderVoiceStatus(row, rec);
+    if (rec.transcript) setVoiceText(row, rec.transcript);
+    scrollBottom();
+    return row;
+  }
+
+  function upsertVoice(rec, opts) {
+    voiceRecords[rec.id] = rec;
+    var row = voiceRows[rec.id];
+    if (!row) { addVoiceRow(rec, opts); return; }
+    var dur = row.querySelector('.vb-dur');
+    if (dur) dur.textContent = fmtDuration(rec.durationMs);
+    renderVoiceStatus(row, rec);
+    if (rec.transcript) setVoiceText(row, rec.transcript);
+  }
+
+  /* 手机松手后立即插入语音条（乐观渲染），随后轮询识别状态。 */
+  window.wechatVoiceSent = function (id, durationMs) {
+    if (typeof id !== 'string' || id === '') { toastText('语音发送失败'); return; }
+    setVoiceMode(false);
+    showVoiceHint(false);
+    upsertVoice({ id: id, durationMs: durationMs, status: 'pending', ts: Date.now() });
+    voiceActive = false;
+    startVoicePolling();
+  };
+
+  function startVoicePolling() {
+    if (voicePollTimer) return;
+    voicePollTimer = setInterval(function () {
+      api('/api/wechat/voices').then(function (r) {
+        if (!r || r.ok !== true || !r.voice) return;
+        var pending = false;
+        for (var i = 0; i < r.voice.length; i++) {
+          var rec = r.voice[i];
+          upsertVoice(rec);
+          if (rec.status === 'pending') pending = true;
+        }
+        if (!pending) { clearInterval(voicePollTimer); voicePollTimer = null; }
+      }).catch(function () {});
+    }, 1500);
+  }
+
+  /* 载入历史语音条：把会话里的「【语音】…」文本消息渲染成语音条。 */
+  function bindVoiceHistory(history) {
+    return api('/api/wechat/voices').then(function (r) {
+      if (!r || r.ok !== true || !r.voice) return history;
+      var queue = r.voice.slice();
+      var used = 0;
+      for (var i = 0; i < history.length; i++) {
+        var m = history[i];
+        if (m.role !== 'user' || typeof m.text !== 'string' || m.text.indexOf('【语音】') !== 0) continue;
+        var rec = queue[used];
+        if (!rec) break;
+        used += 1;
+        voiceRecords[rec.id] = rec;
+        pendingVoiceRenders.push({ id: rec.id, msgId: m.id, rec: rec });
+      }
+      return history;
+    });
+  }
+  var pendingVoiceRenders = [];
+
+  function flushVoiceRenders() {
+    for (var i = 0; i < pendingVoiceRenders.length; i++) {
+      var p = pendingVoiceRenders[i];
+      if (voiceRows[p.id]) continue;
+      addVoiceRow(p.rec, { id: p.msgId });
+    }
+    pendingVoiceRenders = [];
+  }
+
+  /* 乐观插入、还没拿到会话消息 id 的语音条（用于回填 id 以便删除）。 */
+  function pendingVoiceRow() {
+    for (var id in voiceRows) {
+      var row = voiceRows[id];
+      if (row && row.parentNode && !row.dataset.id) return row;
+    }
+    return null;
+  }
+
+  /* ── 语音条操作菜单 ─────────────────────── */
+  var voiceSheetRow = null;
+  var voiceSheetMask = document.getElementById('voiceSheetMask');
+  var voiceSheet = document.getElementById('voiceSheet');
+  function closeVoiceSheet() {
+    voiceSheet.classList.remove('show');
+    voiceSheetMask.classList.remove('show');
+    voiceSheetRow = null;
+  }
+  function openVoiceSheet(row) {
+    voiceSheetRow = row;
+    var rec = voiceRecords[row.dataset.voiceId] || {};
+    var hasText = typeof rec.transcript === 'string' && rec.transcript !== '';
+    var btn = document.getElementById('voiceTextBtn');
+    var box = row.querySelector('.vtext');
+    btn.textContent = (box && !box.hidden) ? '收起文字' : (hasText ? '转文字' : '转文字（识别中）');
+    btn.disabled = !hasText;
+    voiceSheetMask.classList.add('show');
+    voiceSheet.classList.add('show');
+  }
+  voiceSheetMask.addEventListener('click', closeVoiceSheet);
+  document.getElementById('voiceCancelBtn').addEventListener('click', closeVoiceSheet);
+  document.getElementById('voiceTextBtn').addEventListener('click', function () {
+    if (voiceSheetRow) toggleVoiceText(voiceSheetRow);
+    closeVoiceSheet();
+  });
+  document.getElementById('voiceDeleteBtn').addEventListener('click', function () {
+    var row = voiceSheetRow;
+    closeVoiceSheet();
+    if (!row) return;
+    if (!selectMode) enterSelectMode();
+    var id = row.dataset.id;
+    if (id) { selectedIds[id] = true; updateRowChecks(); }
+  });
 
   /* ── 扫码 / 配对 ───────────────────────── */
   function pairFromUrl(url) {

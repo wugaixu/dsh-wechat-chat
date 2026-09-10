@@ -26,7 +26,8 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import { createServer, request as httpRequest } from 'node:http'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { LocalSttManager } from './stt.js'
+import { inspectPcmWav, LocalSttManager } from './stt.js'
+import { VoiceStore } from './voice.js'
 
 export const name = 'wechat-chat'
 export const inject = ['sessionController', 'webServer']
@@ -45,6 +46,8 @@ const DEFAULT_OFFLINE_AFTER_MS = 25 * 1000
 const DEFAULT_MAX_DEVICES = 4
 const COOKIE_MAX_AGE_SEC = 365 * 24 * 60 * 60
 const MAX_BODY = 64 * 1024
+// 已配对令牌的重放窗口：覆盖浏览器/WebView 对同一链接的重复导航。
+const REPLAY_WINDOW_MS = 15 * 60 * 1000
 
 const home = process.env.DSH_HOME || join(homedir(), '.dsh')
 const DEVICES_FILE = join(home, 'whale-devices.json')
@@ -90,9 +93,25 @@ function isLoopbackRequest(request) {
   try { return new URL(origin).host === hostUrl.host } catch { return false }
 }
 
+/**
+ * 该地址手机能否直连：排除自动私有地址（169.254/16，未拿到 DHCP）与
+ * Clash/Mihomo 等代理 TUN 使用的 198.18.0.0/15 伪地址——这些在手机上不可达。
+ */
+function isUsableLanAddress(address) {
+  if (address.startsWith('169.254.')) return false
+  const [a, b] = address.split('.').map(Number)
+  if (a === 198 && (b === 18 || b === 19)) return false
+  return true
+}
+
+function isProxyTunnelInterface(name) {
+  return /^(mihomo|clash|sing-?box|tun|wintun|tap)/i.test(String(name || '').trim())
+}
+
 function lanIPv4Addresses() {
   return Object.values(networkInterfaces()).flat()
     .filter(iface => iface !== undefined && iface.family === 'IPv4' && !iface.internal)
+    .filter(iface => !isProxyTunnelInterface(iface.name) && isUsableLanAddress(iface.address))
     .map(iface => iface.address)
 }
 
@@ -213,6 +232,10 @@ export class PairingService {
     this.config = config
     this.tokens = new Map()
     this.devices = new Map()
+    // 已成功消费的令牌 → 设备，短时间内允许重放同一结果（幂等）。
+    // 浏览器/WebView 可能对同一配对链接发起两次导航（重复提交/重试），
+    // 若第二次直接判 invalid，已经把用户带进聊天的结果会被引导页覆盖。
+    this.recentlyAccepted = new Map()
     this.stopped = false
     this.tokenSerial = 0
     this.dirty = false
@@ -295,6 +318,12 @@ export class PairingService {
   accept(token, userAgent) {
     const record = this.tokens.get(token)
     if (record === undefined || this.stopped || Date.now() > record.expiresAt) {
+      // 令牌已被消费但仍在重放窗口内：返回同一个设备，保证配对导航幂等。
+      const replay = this.recentlyAccepted.get(token)
+      if (replay !== undefined && !this.stopped && Date.now() <= replay.replayUntil
+          && this.devices.has(replay.deviceId)) {
+        return { ok: true, deviceId: replay.deviceId, replayed: true }
+      }
       return { ok: false, code: 'invalid' }
     }
     // 成功配对前先原子消费令牌，防止同一二维码在有效期内被重放。
@@ -314,13 +343,27 @@ export class PairingService {
       lastSeenAt: now,
       ...(label !== undefined ? { userAgent: label } : {}),
     })
+    this.rememberAccepted(token, deviceId, now)
     this.persist()
     return { ok: true, deviceId }
+  }
+
+  /** 记录刚消费的令牌，供重复导航在短时间内取回同一设备（不新建凭据）。 */
+  rememberAccepted(token, deviceId, now) {
+    this.recentlyAccepted.set(token, { deviceId, replayUntil: now + REPLAY_WINDOW_MS })
+    for (const [t, r] of this.recentlyAccepted) {
+      if (now > r.replayUntil) this.recentlyAccepted.delete(t)
+    }
+    while (this.recentlyAccepted.size > 32) {
+      const oldest = this.recentlyAccepted.keys().next().value
+      this.recentlyAccepted.delete(oldest)
+    }
   }
 
   stop() {
     this.tokens.clear()
     this.devices.clear()
+    this.recentlyAccepted.clear()
     this.persist()
     this.stopped = true
   }
@@ -445,6 +488,21 @@ export class TunnelAuthGateway {
     this.authValue = createHmac('sha256', this.secret).update('whale-tunnel-auth-v1').digest('base64url')
     this.server = undefined
     this.failures = new Map()
+    this.recent = [] // 最近经过公网网关的请求，用于本机排查「手机扫码没反应」
+  }
+
+  /** 记录一次公网请求的结果（只看路径/动作，不记录密码或 Cookie 值）。 */
+  record(method, pathname, action, req) {
+    const ua = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'].slice(0, 90) : ''
+    this.recent.push({
+      at: new Date().toISOString(),
+      method,
+      path: String(pathname).slice(0, 200),
+      action,
+      host: typeof req.headers.host === 'string' ? req.headers.host.slice(0, 120) : '',
+      ua,
+    })
+    if (this.recent.length > 40) this.recent.splice(0, this.recent.length - 40)
   }
 
   isAuthorized(req) {
@@ -507,24 +565,33 @@ export class TunnelAuthGateway {
   async handle(req, res) {
     const requestUrl = new URL(req.url || '/', 'http://gateway.invalid')
     if (requestUrl.pathname === '/__whale/login') {
+      const action = (req.method || 'GET') === 'GET' ? 'login-page' : 'login-submit'
+      this.record(req.method || 'GET', requestUrl.pathname, action, req)
       await this.handleLogin(req, res, requestUrl)
       return
     }
     if (!this.isAllowedPath(requestUrl.pathname)) {
+      this.record(req.method || 'GET', requestUrl.pathname, 'blocked-path', req)
       res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
       res.end('not found')
       return
     }
     if (!this.isAuthorized(req)) {
       if ((req.method || 'GET') === 'GET' && requestUrl.pathname === '/wechat') {
+        // 直接内联返回登录页（200），不再 303 跳到 /__whale/login：
+        // 实测在受限网络下手机能发出第一个请求，但随后的跳转请求会被重置，
+        // 于是浏览器停在错误页、用户永远看不到密码框。少一次往返即可避开。
         const next = safeNextPath(req.url || '/wechat')
-        res.writeHead(303, { location: `/__whale/login?next=${encodeURIComponent(next)}`, 'cache-control': 'no-store' })
-        res.end()
+        this.record(req.method || 'GET', requestUrl.pathname, 'password-inline', req)
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' })
+        res.end(loginPage(next))
       } else {
+        this.record(req.method || 'GET', requestUrl.pathname, 'password-required-401', req)
         writeJson(res, 401, { ok: false, code: 'tunnel-password-required' })
       }
       return
     }
+    this.record(req.method || 'GET', requestUrl.pathname, 'proxied', req)
     this.proxy(req, res)
   }
 
@@ -633,10 +700,23 @@ async function loadCloudflared() {
 // cloudflared 二进制放到 node_modules 之外运行，避免 pnpm 重装插件时锁文件
 const CLOUDFLARED_BIN = join(home, 'wechat-chat', process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared')
 
-// 隧道自检路径：登录页始终无需凭据即可访问，用它判断公网地址是否真的可达。
-const TUNNEL_PROBE_PATH = '/__whale/login'
-// 持续不可达超过该时长才重建隧道（重建会换地址，尽量少换）。
-const TUNNEL_REBUILD_AFTER_MS = 120_000
+// 连接器就绪轮询间隔：查 cloudflared 本地 /ready，判断是否已注册到 Cloudflare 边缘。
+const TUNNEL_READY_INTERVAL_MS = 1_500
+// 连接器持续未能就绪多久后重建隧道（重建会换地址，尽量少换）。
+const TUNNEL_REBUILD_AFTER_MS = 60_000
+
+/** 找一个空闲的回环端口，交给 cloudflared 作为本地 metrics/ready 端口。 */
+function freeLoopbackPort() {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => resolve(0))
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address()
+      const port = address && typeof address === 'object' ? address.port : 0
+      probe.close(() => resolve(port))
+    })
+  })
+}
 
 async function ensureCloudflaredBin(cf) {
   if (!existsSync(CLOUDFLARED_BIN)) {
@@ -659,10 +739,12 @@ export class TunnelManager {
     this.phase = 'stopped'
     this.url = undefined
     this.error = undefined
-    this.healthy = false
-    this.probeFailures = 0
-    this.unhealthySince = undefined
-    this.probeTimer = undefined
+    // 连接器就绪状态（本地 /ready），用于快速判定能否出码
+    this.connected = false
+    this.readyFailures = 0
+    this.readyTimer = undefined
+    this.readySince = undefined
+    this.metricsPort = undefined
     this.handle = undefined
     this.timers = []
     this.generation = 0
@@ -679,57 +761,57 @@ export class TunnelManager {
     return {
       phase: this.phase,
       ...(this.url !== undefined ? { url: this.url } : {}),
-      ...(this.url !== undefined ? { healthy: this.healthy } : {}),
+      ...(this.url !== undefined ? { connected: this.connected } : {}),
       ...(this.error !== undefined ? { error: this.error } : {}),
     }
   }
 
-  /** 从公网侧探测隧道是否真的可达（Cloudflare 边缘返回 5xx 即视为不可用）。 */
-  async probe() {
-    if (this.url === undefined) return false
-    const controller = new AbortController()
-    // 本机到 Cloudflare 边缘可能经代理而偏慢，超时给足以免误判为隧道故障。
-    const timer = setTimeout(() => controller.abort(), 15_000)
+  /**
+   * 连接器是否已注册到 Cloudflare 边缘 —— 查 cloudflared 本地 /ready。
+   * 这是"手机能不能连上"的权威且极快的信号（毫秒级、不受本机代理影响）。
+   */
+  async connectorReadyConnections() {
+    // 没拿到本地 metrics 端口时无法判定，按"可用"处理，避免误挡出码
+    if (this.metricsPort === undefined || this.metricsPort <= 0) return 1
     try {
-      const res = await fetch(`${this.url}${TUNNEL_PROBE_PATH}`, {
-        redirect: 'manual',
-        signal: controller.signal,
+      const res = await fetch(`http://127.0.0.1:${this.metricsPort}/ready`, {
+        signal: AbortSignal.timeout(2_000),
         headers: { 'user-agent': 'dsh-wechat-chat-health' },
       })
-      return res.status > 0 && res.status < 500
+      if (!res.ok) return 0
+      const body = await res.json()
+      const count = Number(body && body.readyConnections)
+      return Number.isFinite(count) && count > 0 ? count : 0
     } catch {
-      return false
-    } finally {
-      clearTimeout(timer)
+      return 0
     }
   }
 
-  scheduleProbe(delayMs) {
-    clearTimeout(this.probeTimer)
-    this.probeTimer = setTimeout(() => { void this.runProbe() }, delayMs)
+  scheduleReady(delayMs) {
+    clearTimeout(this.readyTimer)
+    this.readyTimer = setTimeout(() => { void this.runReadyCheck() }, delayMs)
   }
 
-  async runProbe() {
-    if (this.stopping || this.phase !== 'running' || this.url === undefined) return
-    const ok = await this.probe()
+  async runReadyCheck() {
     if (this.stopping || this.phase !== 'running') return
-    if (ok) {
-      this.probeFailures = 0
-      this.unhealthySince = undefined
-      if (!this.healthy) { this.healthy = true; this.emit() }
-      this.scheduleProbe(30_000)
+    const count = await this.connectorReadyConnections()
+    if (this.stopping || this.phase !== 'running') return
+    if (count > 0) {
+      this.readyFailures = 0
+      this.readySince = undefined
+      if (!this.connected) { this.connected = true; this.emit() }
+      this.scheduleReady(10_000)
       return
     }
-    this.probeFailures += 1
-    if (this.healthy) { this.healthy = false; this.emit() }
-    if (this.unhealthySince === undefined) this.unhealthySince = Date.now()
-    // cloudflared 自己会重连边缘；只要进程还活着就尽量复用同一个公网地址，
-    // 避免频繁重建导致地址变化、手机需要反复重新扫码。
-    if (Date.now() - this.unhealthySince >= TUNNEL_REBUILD_AFTER_MS) {
-      this.fail('公网隧道长时间不可达，正在重建')
+    this.readyFailures += 1
+    if (this.connected) { this.connected = false; this.emit() }
+    if (this.readySince === undefined) this.readySince = Date.now()
+    // 连接器长时间注册不上边缘才重建（本地判定，不依赖公网探测）
+    if (Date.now() - this.readySince >= TUNNEL_REBUILD_AFTER_MS) {
+      this.fail('隧道连接器无法注册到 Cloudflare，正在重建')
       return
     }
-    this.scheduleProbe(5_000)
+    this.scheduleReady(TUNNEL_READY_INTERVAL_MS)
   }
 
   emit() {
@@ -751,9 +833,9 @@ export class TunnelManager {
     this.teardown()
     this.url = undefined
     this.error = undefined
-    this.healthy = false
-    this.probeFailures = 0
-    this.unhealthySince = undefined
+    this.connected = false
+    this.readyFailures = 0
+    this.readySince = undefined
     this.setPhase('stopped')
   }
 
@@ -769,7 +851,11 @@ export class TunnelManager {
       const cf = await loadCloudflared()
       await ensureCloudflaredBin(cf)
       if (this.stopping || gen !== this.generation) return
-      const handle = cf.Tunnel.quick(this.target, { '--no-autoupdate': true, '--protocol': 'http2' })
+      // 固定一个本地 metrics 端口，便于用 /ready 毫秒级判断连接器是否就绪
+      this.metricsPort = await freeLoopbackPort()
+      const options = { '--no-autoupdate': true, '--protocol': 'http2' }
+      if (this.metricsPort > 0) options['--metrics'] = `127.0.0.1:${this.metricsPort}`
+      const handle = cf.Tunnel.quick(this.target, options)
       this.handle = handle
       const urlTimer = setTimeout(() => { this.fail('等待隧道地址超时') }, 30_000)
       this.timers.push(urlTimer)
@@ -778,11 +864,11 @@ export class TunnelManager {
         clearTimeout(urlTimer)
         this.url = value
         this.error = undefined
-        this.healthy = false
-        this.probeFailures = 0
-        this.unhealthySince = undefined
+        this.connected = false
+        this.readyFailures = 0
+        this.readySince = undefined
         this.setPhase('running')
-        this.scheduleProbe(1_500)
+        this.scheduleReady(500)
       })
       handle.on('exit', () => {
         if (this.handle !== handle) return
@@ -803,10 +889,10 @@ export class TunnelManager {
     if (this.stopping) return
     this.url = undefined
     this.error = message
-    this.healthy = false
-    this.probeFailures = 0
-    this.unhealthySince = undefined
-    clearTimeout(this.probeTimer)
+    this.connected = false
+    this.readyFailures = 0
+    this.readySince = undefined
+    clearTimeout(this.readyTimer)
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }
       this.handle = undefined
@@ -822,8 +908,8 @@ export class TunnelManager {
     this.stopping = true
     for (const t of this.timers) clearTimeout(t)
     this.timers = []
-    clearTimeout(this.probeTimer)
-    this.probeTimer = undefined
+    clearTimeout(this.readyTimer)
+    this.readyTimer = undefined
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }
       this.handle = undefined
@@ -839,7 +925,24 @@ export class TunnelManager {
 /* ── session-map persistence ──────────────────────────────────────────── */
 
 function loadSessionMap() {
-  try { return JSON.parse(readFileSync(SESSION_MAP_FILE, 'utf8')) } catch { return {} }
+  try {
+    // 容错：外部工具可能写出带 BOM 的 UTF-8，JSON.parse 会直接抛错，
+    // 于是整个映射被当成空 → 重新新建会话。先剥掉 BOM 再解析。
+    return JSON.parse(readFileSync(SESSION_MAP_FILE, 'utf8').replace(/^\uFEFF/, ''))
+  } catch { return {} }
+}
+
+/**
+ * 从会话映射里挑出可复用的会话（本插件预设、且最近创建的那条）。
+ * 用于重装 App / 换设备导致 client 变化时，仍然接着用同一个对话。
+ */
+export function pickReusableSession(map) {
+  let newest
+  for (const record of Object.values(map || {})) {
+    if (!record || record.agentPreset !== AGENT_PRESET || typeof record.sessionId !== 'string') continue
+    if (newest === undefined || (record.createdAt || 0) > (newest.createdAt || 0)) newest = record
+  }
+  return newest
 }
 
 function persistSessionMap(map) {
@@ -957,6 +1060,8 @@ async function fetchDeepSeekBalance() {
 export function apply(ctx, config = {}) {
   const defaultNickname = config.nickname || DEFAULT_NICKNAME
   const sessionTitle = config.title || DEFAULT_TITLE
+  // 默认复用已有对话：重装 App 或换设备后 client 变化时，不再新建会话。
+  const reuseSession = config.reuseSession !== false
   const provider = config.provider || 'deepseek-official'
   const model = config.model || 'deepseek-v4-flash'
   const reasoningEffort = config.reasoningEffort || 'low'
@@ -989,6 +1094,8 @@ export function apply(ctx, config = {}) {
   // 即使暂未设置密码，也始终通过路径白名单网关，避免暴露整个 DSH Web。
   const authGateway = new TunnelAuthGateway(webPort, tunnelPasswordHash)
   const stt = new LocalSttManager(join(home, 'wechat-chat', 'stt'), config.stt || {})
+  // 语音条音频：保留 7 天后自动清理（含索引记录）。
+  const voice = new VoiceStore(join(home, 'wechat-chat', 'voice'))
   const voiceLanguage = config.stt && ['auto', 'zh', 'en'].includes(config.stt.language) ? config.stt.language : 'zh'
   tunnel.onPhase((info) => {
     tunnelBase = info.phase === 'running' && typeof info.url === 'string' && info.url !== '' ? info.url : undefined
@@ -997,8 +1104,7 @@ export function apply(ctx, config = {}) {
   const running = new Map() // deviceKey -> { ac, sessionId }
   const streams = new Map() // deviceId -> Set<{res, closed, keep}>
   const eventQueues = new Map() // deviceKey -> { seq, events: [{seq, payload}] }
-  const lastVoiceAt = new Map() // authenticated device id -> last accepted upload time
-  let voiceUploadActive = false // reserve before buffering to cap memory and transcription concurrency
+  let voiceUploadActive = false // 上传串行化：同时只缓冲一段录音，限制内存占用
 
   const lanHosts = () => lanIPv4Addresses()
   const trustedHosts = () => {
@@ -1053,6 +1159,16 @@ export function apply(ctx, config = {}) {
     // 复用同一会话（预设一致时）：跨扫码/换公网地址保留历史。
     if (existing && existing.sessionId && existing.agentPreset === AGENT_PRESET) {
       return { sessionId: existing.sessionId, map }
+    }
+    // 未命中时复用本插件最近创建的会话，避免重装 App / 换设备后不断新建对话。
+    if (reuseSession) {
+      const newest = pickReusableSession(map)
+      if (newest !== undefined) {
+        map[key] = { sessionId: newest.sessionId, agentPreset: AGENT_PRESET, createdAt: Date.now() }
+        persistSessionMap(map)
+        console.log(`wechat-chat: reusing existing session ${newest.sessionId} for key ${String(key).slice(0, 8)}`)
+        return { sessionId: newest.sessionId, map }
+      }
     }
     // 旧会话用的是标准预设（含交互式提问工具），重建为新预设；旧会话仍留在电脑侧边栏。
     const value = await ctx.sessionController.create({ agentPreset: AGENT_PRESET })
@@ -1159,6 +1275,34 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /* ── 语音条：后台串行识别，完成后自动作为用户消息送入真实会话 ─────── */
+
+  let voiceQueue = Promise.resolve()
+
+  function enqueueVoice(job) {
+    voiceQueue = voiceQueue.then(() => processVoice(job)).catch(() => { /* 单条失败不阻塞后续 */ })
+    return voiceQueue
+  }
+
+  async function processVoice({ id, wav, sessionKey }) {
+    try {
+      const result = await stt.transcribe(wav, voiceLanguage)
+      const text = result.text.trim()
+      if (text === '') throw Object.assign(new Error('没有识别到语音内容'), { code: 'no-speech' })
+      voice.update(id, { status: 'transcribed', transcript: text, durationMs: result.durationMs })
+      if (running.has(sessionKey)) {
+        voice.update(id, { status: 'failed', error: '上一轮回复还在进行，本条未发送' })
+        return
+      }
+      const { sessionId } = await ensureSession(sessionKey)
+      // 电脑会话里显示转写文字并标注来源（用户要求可看出这是语音）。
+      voice.update(id, { status: 'sent' })
+      void runTurn(sessionKey, sessionId, `【语音】${text}`)
+    } catch (error) {
+      voice.update(id, { status: 'failed', error: (error && error.message) || '语音识别失败' })
+    }
+  }
+
   /* ── routes ─────────────────────────────────────────────────────────── */
 
   const cookieHeader = (deviceId) => ({
@@ -1218,6 +1362,13 @@ export function apply(ctx, config = {}) {
     }
     const device = url.searchParams.get('device') || deviceIdOf(req) || ''
     console.log(`wechat-chat: /wechat served to ${(req.socket && req.socket.remoteAddress) || '?'} host=${req.headers.host || '?'} device=${device ? device.slice(0, 8) : 'none'} client=${client ? client.slice(0, 8) : 'none'}`)
+    // App（WebView）自带扫码引导页：未配对时直接 403，让它回落到本地引导页，
+    // 避免再弹出一个多余的服务端「连接电脑上的鲸聊」页面。
+    if (device === '' && /;\s*wv\)/.test(String(req.headers['user-agent'] || ''))) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('unpaired')
+      return
+    }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
     res.end(render(device, ''))
   }
@@ -1290,17 +1441,19 @@ export function apply(ctx, config = {}) {
       // 只走公网：隧道优先，其次手动 publicBaseUrl
       const base = (autoTunnel && tunnelBase !== undefined) ? tunnelBase : (publicBaseUrl || undefined)
       if (base === undefined) {
-        writeJson(res, 409, { ok: false, code: 'lan-required', error: '公网隧道未就绪或未配置公网地址' })
+        writeJson(res, 409, { ok: false, code: 'tunnel-required', error: '公网隧道未就绪或未配置公网地址' })
         return
       }
-      // 隧道自检未通过时不签发二维码，避免手机扫到返回 Cloudflare 1033 的死链。
-      if (base === tunnelBase && !tunnel.healthy) {
-        writeJson(res, 409, { ok: false, code: 'tunnel-unhealthy', error: '公网隧道正在自检连通性，请稍候几秒后再刷新二维码', tunnel: tunnel.info() })
+      // 连接器未注册到 Cloudflare 边缘时才拒绝（本地判定，毫秒级）；
+      // 公网探测慢且受本机代理影响，仅作为面板上的参考信息，不阻塞出码。
+      if (base === tunnelBase && !tunnel.connected) {
+        writeJson(res, 409, { ok: false, code: 'tunnel-not-connected', error: '公网隧道还在连接 Cloudflare，请稍候几秒', tunnel: tunnel.info() })
         return
       }
       const { token, expiresAt } = service.issue()
       writeJson(res, 200, {
         ok: true,
+        mode: 'public',
         token,
         expiresAt,
         url: `${base}/wechat?pair=${token}`,
@@ -1358,6 +1511,13 @@ export function apply(ctx, config = {}) {
       return
     }
 
+    // 排查用：最近经过公网网关的请求（仅本机可读，不含密码与 Cookie 值）。
+    if (pathname === '/api/whale/tunnel/log') {
+      if (!loopbackFence(req) || req.method !== 'GET') { writeJson(res, req.method === 'GET' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
+      writeJson(res, 200, { ok: true, requests: authGateway.recent })
+      return
+    }
+
     if (pathname === '/api/whale/pair/status') {
       if (!lanFence(req) || req.method !== 'GET') { writeJson(res, req.method === 'GET' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
       const deviceId = readCookie(req.headers.cookie, COOKIE_NAME)
@@ -1382,8 +1542,9 @@ export function apply(ctx, config = {}) {
     const client = url.searchParams.get('client') || undefined
     const credentialDevice = deviceIdOf(req) || undefined
     const device = credentialDevice || queryDevice
-    // A client id is only a continuity hint inside one authenticated device boundary.
-    const key = device ? `${device}:${client || 'default'}` : undefined
+    // 会话键优先用 App 内持久化的 client：设备 id 每次重新配对都会变，
+    // 只有 client 能跨扫码/换公网地址稳定指向同一个对话。
+    const key = client || device || undefined
 
     if (pathname === '/api/wechat/avatar/other' || pathname === '/api/wechat/avatar/me') {
       if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
@@ -1484,7 +1645,7 @@ export function apply(ctx, config = {}) {
       return
     }
 
-    if (pathname === '/api/wechat/voice/transcribe') {
+    if (pathname === '/api/wechat/voice/send') {
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, code: 'method-not-allowed' }); return }
       if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
       if (!device || !key) { writeJson(res, 400, { ok: false, code: 'missing-device', error: '缺少设备凭据' }); return }
@@ -1492,11 +1653,9 @@ export function apply(ctx, config = {}) {
       if (type !== 'audio/wav' && type !== 'audio/x-wav') { writeJson(res, 415, { ok: false, code: 'unsupported-format', error: '仅支持 PCM WAV 录音' }); return }
       const declared = Number(req.headers['content-length'])
       if (Number.isFinite(declared) && declared > 2_100_000) { writeJson(res, 413, { ok: false, code: 'too-large', error: '录音不能超过 60 秒' }); return }
-      const now = Date.now()
-      if (now - (lastVoiceAt.get(key) || 0) < 2_000) { writeJson(res, 429, { ok: false, code: 'rate-limited', error: '语音请求过于频繁' }); return }
-      if (stt.busy) { writeJson(res, 429, { ok: false, code: 'stt-busy', error: '电脑正在识别另一条语音，请稍后重试' }); return }
-      if (voiceUploadActive) { writeJson(res, 429, { ok: false, code: 'upload-busy', error: '正在处理另一段录音上传，请稍后重试' }); return }
+      if (voiceUploadActive) { writeJson(res, 429, { ok: false, code: 'upload-busy', error: '正在处理上一段录音，请稍后重试' }); return }
       voiceUploadActive = true
+      let job
       try {
         const body = await readRawBody(req, 2_100_000)
         if (!body.ok) {
@@ -1504,16 +1663,49 @@ export function apply(ctx, config = {}) {
           writeJson(res, status, { ok: false, code: body.tooLarge ? 'too-large' : body.timeout ? 'upload-timeout' : 'bad-upload', error: '录音上传失败' })
           return
         }
-        lastVoiceAt.set(key, now)
-        const result = await stt.transcribe(body.buffer, voiceLanguage)
-        writeJson(res, 200, { ok: true, text: result.text, durationMs: result.durationMs, elapsedMs: result.elapsedMs })
-      } catch (error) {
-        const code = error && error.code
-        const status = code === 'not-ready' ? 503 : code === 'busy' ? 429 : code === 'timeout' ? 504 : code === 'no-speech' ? 422 : 400
-        writeJson(res, status, { ok: false, code: code || 'transcribe-failed', error: (error && error.message) || '语音识别失败' })
+        let wav
+        try {
+          wav = inspectPcmWav(body.buffer)
+        } catch (err) {
+          writeJson(res, 400, { ok: false, code: 'bad-audio', error: (err && err.message) || '录音格式无效' })
+          return
+        }
+        const id = voice.add({ sessionKey: key, wav: body.buffer })
+        voice.update(id, { durationMs: wav.durationMs })
+        job = { id, wav: body.buffer, deviceId: device, sessionKey: key }
+        // 先让手机立刻拿到语音条 id 用于渲染，再后台串行识别并自动送入电脑会话。
+        writeJson(res, 200, { ok: true, id, durationMs: wav.durationMs, status: 'pending' })
       } finally {
         voiceUploadActive = false
       }
+      if (job !== undefined) enqueueVoice(job)
+      return
+    }
+
+    if (pathname.startsWith('/api/wechat/voice/') && req.method === 'GET') {
+      if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
+      const id = pathname.slice('/api/wechat/voice/'.length)
+      const file = voice.filePath(id)
+      if (file === undefined || !existsSync(file)) { writeJson(res, 404, { ok: false, code: 'not-found' }); return }
+      try {
+        const data = readFileSync(file)
+        res.writeHead(200, {
+          'content-type': 'audio/wav',
+          'content-length': String(data.length),
+          'cache-control': 'private, max-age=86400',
+        })
+        res.end(data)
+      } catch {
+        writeJson(res, 500, { ok: false, code: 'read-failed' })
+      }
+      return
+    }
+
+    // 语音条状态：手机轮询它来更新「识别中 / 已发送 / 失败」与转写文字。
+    if (pathname === '/api/wechat/voices') {
+      if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
+      if (!key) { writeJson(res, 400, { ok: false, code: 'missing-device' }); return }
+      writeJson(res, 200, { ok: true, voice: voice.list(key) })
       return
     }
 

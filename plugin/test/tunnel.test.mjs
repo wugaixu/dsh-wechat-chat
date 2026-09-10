@@ -3,124 +3,100 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { TunnelManager } from '../lib/index.js'
 
-/** 启动一个临时 HTTP 服务，用于模拟隧道公网侧的响应。 */
-function listen(handler) {
+/** 起一个临时 HTTP 服务，模拟 cloudflared 的本地 /ready 端点。 */
+function readyServer(payload) {
   return new Promise((resolve) => {
-    const server = createServer(handler)
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address()
-      resolve({ server, url: `http://127.0.0.1:${port}` })
+    const server = createServer((req, res) => {
+      if (req.url !== '/ready') { res.writeHead(404); res.end(); return }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(payload))
     })
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }))
   })
 }
 
-test('probe treats a reachable tunnel as healthy', async () => {
-  const { server, url } = await listen((req, res) => {
-    assert.equal(req.url, '/__whale/login')
-    res.writeHead(200, { 'content-type': 'text/html' })
-    res.end('<title>鲸聊安全登录</title>')
-  })
-  try {
-    const manager = new TunnelManager('http://127.0.0.1:1')
-    manager.url = url
-    assert.equal(await manager.probe(), true)
-  } finally {
-    server.close()
-  }
-})
-
-test('probe rejects Cloudflare 5xx edge errors', async () => {
-  const { server, url } = await listen((req, res) => {
-    res.writeHead(530, { 'content-type': 'text/html' })
-    res.end('error 1033')
-  })
-  try {
-    const manager = new TunnelManager('http://127.0.0.1:1')
-    manager.url = url
-    assert.equal(await manager.probe(), false)
-  } finally {
-    server.close()
-  }
-})
-
-test('probe rejects an unreachable or unknown tunnel host', async () => {
+test('没有 metrics 端口时不阻塞出码（按可用处理）', async () => {
   const manager = new TunnelManager('http://127.0.0.1:1')
-  assert.equal(await manager.probe(), false, 'no url means not healthy')
-  manager.url = 'http://127.0.0.1:9'
-  assert.equal(await manager.probe(), false, 'closed port means not healthy')
+  assert.equal(await manager.connectorReadyConnections(), 1)
 })
 
-test('probe accepts redirect responses from a healthy gateway', async () => {
-  const { server, url } = await listen((req, res) => {
-    res.writeHead(303, { location: '/__whale/login' })
-    res.end()
-  })
+test('连接器已就绪时返回就绪连接数', async () => {
+  const { server, port } = await readyServer({ status: 200, readyConnections: 4 })
   try {
     const manager = new TunnelManager('http://127.0.0.1:1')
-    manager.url = url
-    assert.equal(await manager.probe(), true)
-  } finally {
-    server.close()
-  }
+    manager.metricsPort = port
+    assert.equal(await manager.connectorReadyConnections(), 4)
+  } finally { server.close() }
 })
 
-test('info exposes health only once a public url exists', async () => {
+test('连接器未就绪或端点不可达时返回 0', async () => {
+  const { server, port } = await readyServer({ status: 200, readyConnections: 0 })
+  try {
+    const manager = new TunnelManager('http://127.0.0.1:1')
+    manager.metricsPort = port
+    assert.equal(await manager.connectorReadyConnections(), 0)
+  } finally { server.close() }
+
+  const dead = new TunnelManager('http://127.0.0.1:1')
+  dead.metricsPort = 9 // 关闭的端口
+  assert.equal(await dead.connectorReadyConnections(), 0)
+})
+
+test('info 仅在拿到地址后暴露 connected', () => {
   const manager = new TunnelManager('http://127.0.0.1:1')
   assert.deepEqual(manager.info(), { phase: 'stopped' })
   manager.url = 'https://example.trycloudflare.com'
-  manager.healthy = true
+  manager.connected = true
   assert.deepEqual(manager.info(), {
     phase: 'stopped',
     url: 'https://example.trycloudflare.com',
-    healthy: true,
+    connected: true,
   })
   manager.stop()
-  assert.equal(manager.healthy, false)
+  assert.equal(manager.connected, false)
   assert.deepEqual(manager.info(), { phase: 'stopped' })
 })
 
-test('repeated probe failures keep the same tunnel instead of churning the url', async () => {
+test('连接器掉线只标记未就绪，短时间不换地址', async () => {
   const manager = new TunnelManager('http://127.0.0.1:1')
   let rebuilds = 0
   manager.fail = () => { rebuilds += 1 }
-  manager.scheduleProbe = () => {} // 测试中不排定后台定时器
+  manager.scheduleReady = () => {}
   manager.url = 'https://stable-name.trycloudflare.com'
   manager.phase = 'running'
-  manager.healthy = true
-  manager.probe = async () => false
-  for (let i = 0; i < 10; i += 1) await manager.runProbe()
-  assert.equal(manager.healthy, false, 'marked unhealthy')
-  assert.equal(rebuilds, 0, 'still within the rebuild grace window: url stays stable')
-  assert.equal(manager.url, 'https://stable-name.trycloudflare.com', 'address is reused')
-  assert.equal(manager.probeFailures, 10)
+  manager.connected = true
+  manager.connectorReadyConnections = async () => 0
+  for (let i = 0; i < 10; i += 1) await manager.runReadyCheck()
+  assert.equal(manager.connected, false)
+  assert.equal(rebuilds, 0, '宽限期内保持同一地址，手机无需重新扫码')
+  assert.equal(manager.url, 'https://stable-name.trycloudflare.com')
 })
 
-test('a long outage eventually rebuilds the tunnel', async () => {
+test('长时间连不上 Cloudflare 才重建隧道', async () => {
   const manager = new TunnelManager('http://127.0.0.1:1')
   let rebuilds = 0
   manager.fail = () => { rebuilds += 1 }
-  manager.scheduleProbe = () => {}
+  manager.scheduleReady = () => {}
   manager.url = 'https://stuck-name.trycloudflare.com'
   manager.phase = 'running'
-  manager.healthy = true
-  manager.unhealthySince = Date.now() - 121_000 // 已持续不可达超过阈值
-  manager.probe = async () => false
-  await manager.runProbe()
+  manager.connected = true
+  manager.readySince = Date.now() - 61_000
+  manager.connectorReadyConnections = async () => 0
+  await manager.runReadyCheck()
   assert.equal(rebuilds, 1)
-  assert.equal(manager.healthy, false)
+  assert.equal(manager.connected, false)
 })
 
-test('a recovered probe restores health without changing the address', async () => {
+test('连接器恢复后就绪状态回归且地址不变', async () => {
   const manager = new TunnelManager('http://127.0.0.1:1')
-  manager.scheduleProbe = () => {}
+  manager.scheduleReady = () => {}
   manager.url = 'https://recovers.trycloudflare.com'
   manager.phase = 'running'
-  manager.healthy = false
-  manager.unhealthySince = Date.now() - 60_000
-  manager.probe = async () => true
-  await manager.runProbe()
-  assert.equal(manager.healthy, true)
-  assert.equal(manager.unhealthySince, undefined, 'grace timer cleared after recovery')
-  assert.equal(manager.probeFailures, 0)
-  assert.equal(manager.url, 'https://recovers.trycloudflare.com', 'same address reused, no re-scan needed')
+  manager.connected = false
+  manager.readySince = Date.now() - 30_000
+  manager.connectorReadyConnections = async () => 2
+  await manager.runReadyCheck()
+  assert.equal(manager.connected, true)
+  assert.equal(manager.readySince, undefined)
+  assert.equal(manager.url, 'https://recovers.trycloudflare.com')
 })

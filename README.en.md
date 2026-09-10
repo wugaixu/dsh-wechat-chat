@@ -187,19 +187,18 @@ outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
 - The free tunnel changes address on every dsh-web restart (trycloudflare quick
   tunnel behavior): re-scan the QR once after a restart (scanning updates the
   server address and re-pairs); LAN use is unaffected.
-- A tunnel address alone is not enough: the plugin self-checks that address from the
-  public side (it fetches the login page) and only issues a QR code **after the check
-  passes**, so the phone can never land on a Cloudflare 1033 error page; meanwhile the
-  panel shows "checking connectivity".
-- While the self-check fails the plugin **keeps the same address** (cloudflared
-  reconnects to the edge on its own) and only rebuilds the tunnel after two minutes of
-  continuous unreachability, so a brief hiccup never forces another QR scan.
-- Tunnel stability depends on this machine's network path to the Cloudflare edge. If a
-  local proxy is running, tunnel traffic goes through it: pick a stable node. Measured
-  on some networks, forcing the tunnel domains to "DIRECT" makes it strictly worse
-  (TLS resets), so that is not a safe blanket fix.
-- Plain-HTTP LAN install/use works (the app allows cleartext traffic); voice upload
-  still requires HTTPS to prevent eavesdropping.
+- Once a tunnel address exists, the plugin polls cloudflared's **local `/ready`** (milliseconds)
+  to confirm the connector registered with Cloudflare; the panel shows "connecting to Cloudflare…"
+  until then and issues the QR automatically afterwards. This check is entirely local — it never
+  goes over the public internet and is unaffected by a local proxy.
+- While the connector is down the plugin **keeps the same address** (cloudflared reconnects on its
+  own) and only rebuilds the tunnel after a minute of failed registration, so a brief hiccup never
+  forces another QR scan.
+- Tunnel stability depends on this machine's network path to the Cloudflare edge. If a local proxy is
+  running, tunnel traffic goes through it: pick a stable node. Measured on some networks, forcing the
+  tunnel domains to "DIRECT" makes it strictly worse (TLS resets), so that is not a safe blanket fix.
+- Voice input requires HTTPS (the app allows cleartext traffic, but voice upload is https-only to
+  prevent eavesdropping).
 
 ## Security
 
