@@ -448,7 +448,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** 在页面里执行一段 JS（仅用于语音相关的 UI 回调）。 */
     private void runJs(String script) {
-        runOnUiThread(() -> webView.evaluateJavascript(script, null));
+        runOnUiThread(() -> {
+            try { if (webView != null) webView.evaluateJavascript(script, null); } catch (Exception ignored) {}
+        });
     }
 
     /** 语音条已上传成功：让页面立刻插入气泡，后续识别状态由页面轮询。 */
@@ -472,6 +474,8 @@ public class MainActivity extends AppCompatActivity {
         if (recorder != null) try { recorder.stop(); } catch (Exception ignored) {}
         if (voiceUploadCall != null) voiceUploadCall.cancel();
         voiceUploadCall = null;
+        // 必须通知页面收起录音浮层，否则取消后红色提示会一直留在屏幕上
+        runJs("window.wechatVoiceCancelled && window.wechatVoiceCancelled();");
     }
 
     private void cleanupVoice() {
