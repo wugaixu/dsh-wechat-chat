@@ -818,6 +818,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
         if (m.role === 'user') addRow('me', m.text, cfg.avatarMe, m.id);
         else addAssistant(m.text, m.id);
       });
+      sttReady = !!(s.stt && s.stt.ready);
       if (s.busy) setStatus('正在思考');
       startPolling();
       loadBalance();
@@ -931,6 +932,8 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
 
   /* ── 语音输入 ──────────────────────────── */
   var voiceMode = false;
+  var voiceActive = false;
+  var sttReady = false;
   function setVoiceMode(on) {
     voiceMode = on;
     if (on) {
@@ -944,6 +947,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
       sendBtn.style.display = '';
       holdTalk.classList.remove('show');
     }
+    try { if (window.WechatBridge && window.WechatBridge.setNativeVoiceVisible) window.WechatBridge.setNativeVoiceVisible(!!on); } catch (err) {}
   }
   voiceBtn.addEventListener('click', function () { setVoiceMode(!voiceMode); });
 
@@ -968,6 +972,9 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
   }
   holdTalk.addEventListener('touchstart', function (e) {
     e.preventDefault();
+    if (voiceActive) return;
+    if (!sttReady) { toastText('请先在电脑配对面板安装离线语音模型'); return; }
+    voiceActive = true;
     var t = e.touches[0];
     voiceStartY = t.clientY;
     voiceCancelling = false;
@@ -977,8 +984,8 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     voiceCancelHintText.textContent = '上滑取消';
     holdTalk.classList.add('recording');
     showVoiceHint(true);
-    try { if (window.WechatBridge && window.WechatBridge.startVoice) window.WechatBridge.startVoice(); }
-    catch (err) { showVoiceHint(false); toastText('当前环境不支持语音输入'); }
+    try { if (window.WechatBridge && window.WechatBridge.startVoice) window.WechatBridge.startVoice(deviceId || ''); else throw new Error('bridge unavailable'); }
+    catch (err) { voiceActive = false; showVoiceHint(false); toastText('当前环境不支持语音输入'); }
   });
   holdTalk.addEventListener('touchmove', function (e) {
     var y = e.touches[0].clientY;
@@ -991,20 +998,32 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
   holdTalk.addEventListener('touchend', function (e) {
     e.preventDefault();
     holdTalk.classList.remove('recording');
-    showVoiceHint(false);
     if (voiceCancelling) {
+      voiceActive = false;
+      showVoiceHint(false);
       try { if (window.WechatBridge && window.WechatBridge.cancelVoice) window.WechatBridge.cancelVoice(); } catch (err) {}
     } else {
+      voiceHintLabel.textContent = '正在上传录音';
+      voiceHintText.textContent = '随后将在电脑本地离线识别';
       try { if (window.WechatBridge && window.WechatBridge.stopVoice) window.WechatBridge.stopVoice(); } catch (err) {}
     }
     voiceCancelling = false;
   });
   holdTalk.addEventListener('touchcancel', function () {
     holdTalk.classList.remove('recording');
+    voiceActive = false;
     showVoiceHint(false);
     try { if (window.WechatBridge && window.WechatBridge.cancelVoice) window.WechatBridge.cancelVoice(); } catch (err) {}
     voiceCancelling = false;
   });
+
+  window.wechatVoiceProgress = function (stage, percent, message) {
+    showVoiceHint(true);
+    if (stage === 'recording') voiceHintLabel.textContent = '正在录音，松开结束';
+    else if (stage === 'uploading') voiceHintLabel.textContent = '正在上传录音';
+    else if (stage === 'transcribing') voiceHintLabel.textContent = '电脑正在离线识别';
+    voiceHintText.textContent = message || '';
+  };
 
   /* 实时识别中间结果：显示在语音提示里 */
   window.wechatVoicePartial = function (text) {
@@ -1013,15 +1032,21 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     }
   };
 
-  /* 语音识别结果回来：转成文字直接发送 */
+  /* 转写结果先进入输入框，由用户确认或修改后再发送。 */
   window.wechatVoiceResult = function (text) {
+    voiceActive = false;
+    showVoiceHint(false);
     if (typeof text !== 'string' || text.trim() === '') { toastText('没有识别到内容'); return; }
+    setVoiceMode(false);
     input.value = text.trim();
     autoGrow();
-    send();
+    input.focus();
+    toastText('语音已转成文字，请确认后发送');
   };
   /* 语音识别出错提示 */
   window.wechatVoiceError = function (msg) {
+    voiceActive = false;
+    showVoiceHint(false);
     toastText(msg || '语音识别失败');
   };
 

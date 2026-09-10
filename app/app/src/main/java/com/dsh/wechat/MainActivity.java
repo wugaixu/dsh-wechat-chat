@@ -33,29 +33,27 @@ import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
 import com.yalantis.ucrop.UCrop;
 
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.RequestBody;
 import okhttp3.Response;
-import okhttp3.WebSocket;
-import okhttp3.WebSocketListener;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 
 public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
+    private android.widget.TextView nativeVoiceButton;
     private static final int CAMERA_REQ = 100;
     private static final int PICK_AVATAR_REQ = 200;
     private static final int PICK_BG_REQ = 300;
@@ -64,20 +62,28 @@ public class MainActivity extends AppCompatActivity {
     private String pendingAvatarSide = "other";
     private String pendingPickKind = "avatar";
 
-    // 讯飞语音听写（WebSocket，系统网络栈）；密钥由 BuildConfig 从 secrets.properties 注入
-    private static final String IF_APP_ID = BuildConfig.IFLYTEK_APP_ID;
-    private static final String IF_API_KEY = BuildConfig.IFLYTEK_API_KEY;
-    private static final String IF_API_SECRET = BuildConfig.IFLYTEK_API_SECRET;
-    private static final String IF_HOST = "iat-api.xfyun.cn";
-    private WebSocket iatWs = null;
+    // 本机离线语音：手机只录制 PCM/WAV，经已配对的鲸聊隧道上传到电脑转写。
+    private static final int VOICE_SAMPLE_RATE = 16000;
+    private static final int VOICE_MAX_PCM_BYTES = 1_920_000; // 60 秒、16-bit、单声道
+    private final OkHttpClient voiceHttp = new OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(150, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build();
     private AudioRecord audioRecord = null;
     private Thread recordThread = null;
+    private Call voiceUploadCall = null;
     private volatile boolean voiceRunning = false;
     private volatile boolean voiceStopRequested = false;
     private volatile boolean voiceCancelled = false;
-    private volatile boolean voiceReleased = false;
-    private String voiceFinalText = null; // 仅 UI 线程访问
-    private final java.util.List<String> voiceSegments = new java.util.ArrayList<>();
+    private boolean voiceHoldActive = false;
+    private boolean pendingVoicePermission = false;
+    private int voiceGeneration = 0;
+    private String voiceDeviceId = "";
+    private String voiceOrigin = "";
+    private String voiceCookie = "";
 
     /** 稳定客户端标识：跨扫码/换公网地址保留同一会话历史。 */
     private String clientId() {
@@ -97,12 +103,50 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
 
         webView = findViewById(R.id.webview);
+        nativeVoiceButton = findViewById(R.id.native_voice_button);
+        nativeVoiceButton.setOnTouchListener((view, event) -> {
+            if (event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+                view.setBackgroundColor(0xffd8d8d8);
+                startVoiceRecognition();
+                return true;
+            }
+            if (event.getAction() == android.view.MotionEvent.ACTION_MOVE && event.getY() < -80) {
+                view.setBackgroundColor(0xfff5f5f5);
+                voiceHoldActive = false;
+                cancelVoiceRecognition();
+                return true;
+            }
+            if (event.getAction() == android.view.MotionEvent.ACTION_UP) {
+                view.setBackgroundColor(0xfff5f5f5);
+                voiceHoldActive = false;
+                stopVoiceRecognition();
+                return true;
+            }
+            if (event.getAction() == android.view.MotionEvent.ACTION_CANCEL) {
+                view.setBackgroundColor(0xfff5f5f5);
+                voiceHoldActive = false;
+                cancelVoiceRecognition();
+                return true;
+            }
+            return true;
+        });
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri uri = request.getUrl();
+                if ("file".equalsIgnoreCase(uri.getScheme())) return false;
+                String saved = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", "");
+                String target = normalizedOrigin(uri.toString());
+                if (!saved.isEmpty() && saved.equals(target)) return false;
+                Toast.makeText(MainActivity.this, "已阻止跳转到非配对地址", Toast.LENGTH_SHORT).show();
+                return true;
+            }
+
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame()) backToFirstRun();
@@ -117,6 +161,7 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 // 进入远程页后清空历史：返回键直接退出，不再回到引导页
                 if (!url.startsWith("file://")) view.clearHistory();
+                else nativeVoiceButton.setVisibility(android.view.View.GONE);
             }
         });
         webView.setWebChromeClient(new WebChromeClient());
@@ -164,272 +209,235 @@ public class MainActivity extends AppCompatActivity {
             openGallery("选择背景", PICK_BG_REQ);
         }
 
+        /** JavaScript can expose the native consent surface, but cannot start the microphone. */
         @JavascriptInterface
-        public void startVoice() {
-            runOnUiThread(() -> startVoiceRecognition());
-        }
-
-        @JavascriptInterface
-        public void stopVoice() {
-            runOnUiThread(() -> stopVoiceRecognition());
-        }
-
-        @JavascriptInterface
-        public void cancelVoice() {
-            runOnUiThread(() -> cancelVoiceRecognition());
+        public void setNativeVoiceVisible(boolean visible) {
+            runOnUiThread(() -> {
+                String saved = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", "");
+                String current = normalizedOrigin(webView.getUrl());
+                boolean chatPage = webView.getUrl() != null && Uri.parse(webView.getUrl()).getPath() != null
+                        && Uri.parse(webView.getUrl()).getPath().startsWith("/wechat");
+                nativeVoiceButton.setVisibility(visible && !saved.isEmpty() && saved.equals(current) && chatPage
+                        ? android.view.View.VISIBLE : android.view.View.GONE);
+            });
         }
     }
 
-    /** 语音输入开始（按住说话）。 */
+    /** 语音输入开始（按住说话）：只录音，不连接任何第三方语音服务。 */
     private void startVoiceRecognition() {
+        if (voiceRunning) return;
+        voiceHoldActive = true;
+        voiceDeviceId = "";
+        voiceOrigin = normalizedOrigin(webView.getUrl());
+        String savedOrigin = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", "");
+        if (voiceOrigin.isEmpty() || !voiceOrigin.equals(savedOrigin)) {
+            voiceHoldActive = false;
+            voiceError("当前页面不是已配对的鲸聊地址");
+            return;
+        }
+        if (!voiceOrigin.startsWith("https://")) {
+            voiceHoldActive = false;
+            voiceError("为防止录音和凭据被窃听，语音输入仅支持 HTTPS 公网隧道");
+            return;
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingVoicePermission = true;
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, REC_AUDIO_REQ);
             return;
         }
-        if (IF_APP_ID == null || IF_APP_ID.isEmpty() || IF_APP_ID.startsWith("your_")
-                || IF_API_KEY.startsWith("your_") || IF_API_SECRET.startsWith("your_")) {
-            voiceError("未配置讯飞语音密钥：请在 app/app/secrets.properties 填入后重新构建（见 docs/iflytek-voice.md）");
-            return;
-        }
-        if (voiceRunning) return;
+        beginVoiceCapture();
+    }
+
+    private void beginVoiceCapture() {
+        if (!voiceHoldActive || voiceRunning) return;
+        pendingVoicePermission = false;
         voiceRunning = true;
         voiceStopRequested = false;
         voiceCancelled = false;
-        voiceReleased = false;
-        voiceFinalText = null;
-        synchronized (voiceSegments) { voiceSegments.clear(); }
+        final int generation = ++voiceGeneration;
+        voiceCookie = CookieManager.getInstance().getCookie(voiceOrigin + "/wechat");
         try {
-            String url = buildIatUrl();
-            OkHttpClient client = new OkHttpClient.Builder()
-                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                    .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                    .build();
-            Request req = new Request.Builder().url(url).build();
-            iatWs = client.newWebSocket(req, new WebSocketListener() {
-                @Override public void onOpen(WebSocket ws, Response response) {
-                    startRecording(ws);
+            int minBuf = AudioRecord.getMinBufferSize(VOICE_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            if (minBuf <= 0) throw new IllegalStateException("设备不支持 16kHz 录音");
+            final AudioRecord recorder = new AudioRecord(MediaRecorder.AudioSource.MIC, VOICE_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(minBuf, 1280 * 4));
+            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+                recorder.release();
+                throw new IllegalStateException("麦克风初始化失败");
+            }
+            audioRecord = recorder;
+            recorder.startRecording();
+            voiceProgress("recording", 0, "正在录音，松开后在电脑本地识别");
+            recordThread = new Thread(() -> recordVoiceLoop(recorder, generation), "whale-voice-record");
+            recordThread.start();
+            webView.postDelayed(() -> {
+                if (generation == voiceGeneration && voiceRunning) {
+                    voiceHoldActive = false;
+                    stopVoiceRecognition();
                 }
-                @Override public void onMessage(WebSocket ws, String text) {
-                    handleIatMessage(text);
-                }
-                @Override public void onFailure(WebSocket ws, Throwable t, Response response) {
-                    runOnUiThread(() -> {
-                        if (voiceFinalText != null) return; // 服务端已给最终结果，忽略连接关闭
-                        cleanupVoice();
-                        voiceError("连接讯飞失败：" + (t != null && t.getMessage() != null ? t.getMessage() : "网络不可用"));
-                    });
-                }
-                @Override public void onClosed(WebSocket ws, int code, String reason) {}
-            });
-            // 最长按住 60 秒自动松手
-            webView.postDelayed(() -> { if (voiceRunning) stopVoiceRecognition(); }, 60000);
+            }, 60000);
         } catch (Exception e) {
             voiceRunning = false;
-            voiceError("语音识别启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
+            voiceError("录音启动失败：" + safeMessage(e));
         }
     }
 
-    /** 语音输入结束（松开）：只有松手才真正发送最终文字。 */
-    private void stopVoiceRecognition() {
-        voiceReleased = true;
-        if (voiceFinalText != null) {
-            if (voiceRunning) finishVoice(voiceFinalText);
-        } else {
-            voiceStopRequested = true; // 让录音线程发结束帧，等最终结果
-        }
-    }
-
-    /** 构造鉴权 WebSocket URL（hmac-sha256 签名）。 */
-    private String buildIatUrl() throws Exception {
-        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US);
-        sdf.setTimeZone(java.util.TimeZone.getTimeZone("GMT"));
-        String date = sdf.format(new java.util.Date());
-        String requestLine = "GET /v2/iat HTTP/1.1";
-        String signatureOrigin = "host: " + IF_HOST + "\ndate: " + date + "\n" + requestLine;
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(IF_API_SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-        String signature = Base64.encodeToString(mac.doFinal(signatureOrigin.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
-        String authOrigin = "api_key=\"" + IF_API_KEY + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
-        String authorization = Base64.encodeToString(authOrigin.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
-        // 关键：authorization 是 base64（含 + / =），必须 URL 编码，否则 + 会被解码成空格导致签名校验失败
-        String authEncoded = java.net.URLEncoder.encode(authorization, "UTF-8");
-        String dateEncoded = java.net.URLEncoder.encode(date, "UTF-8").replace("+", "%20");
-        return "wss://" + IF_HOST + "/v2/iat?authorization=" + authEncoded + "&date=" + dateEncoded + "&host=" + IF_HOST;
-    }
-
-    /** WebSocket 连上后启动录音，持续发音频帧。 */
-    private void startRecording(final WebSocket ws) {
+    private void recordVoiceLoop(AudioRecord recorder, int generation) {
+        ByteArrayOutputStream pcm = new ByteArrayOutputStream(VOICE_MAX_PCM_BYTES);
+        byte[] chunk = new byte[1280];
         try {
-            final int sampleRate = 16000;
-            int minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(minBuf, 1280 * 4));
-            audioRecord.startRecording();
-            recordThread = new Thread(() -> {
-                byte[] buf = new byte[1280];
-                boolean first = true;
-                try {
-                    while (voiceRunning && !voiceStopRequested) {
-                        int read = audioRecord.read(buf, 0, 1280);
-                        if (read > 0) {
-                            byte[] chunk = (read == 1280) ? buf : Arrays.copyOf(buf, read);
-                            sendAudio(ws, chunk, first ? 0 : 1);
-                            first = false;
-                        }
-                    }
-                } catch (Exception ignored) {}
-                try { audioRecord.stop(); } catch (Exception e) {}
-                try { audioRecord.release(); } catch (Exception e) {}
-                audioRecord = null;
-                sendAudioEnd(ws);
-                // 兜底：发完结束帧 5 秒仍无最终结果，用已累计文字收尾
-                runOnUiThread(() -> webView.postDelayed(() -> {
-                    if (voiceRunning && voiceFinalText == null) {
-                        finishVoice(voiceFullText());
-                    }
-                }, 5000));
-            });
-            recordThread.start();
-        } catch (Exception e) {
-            runOnUiThread(() -> {
-                cleanupVoice();
-                voiceError("录音启动失败：" + (e.getMessage() == null ? "未知错误" : e.getMessage()));
-            });
-        }
-    }
-
-    private void sendAudio(WebSocket ws, byte[] pcm, int status) {
-        try {
-            JSONObject data = new JSONObject();
-            data.put("status", status);
-            data.put("format", "audio/L16;rate=16000");
-            data.put("encoding", "raw");
-            data.put("audio", Base64.encodeToString(pcm, Base64.NO_WRAP));
-            JSONObject frame = new JSONObject();
-            if (status == 0) {
-                frame.put("common", new JSONObject().put("app_id", IF_APP_ID));
-                frame.put("business", new JSONObject()
-                        .put("language", "zh_cn")
-                        .put("domain", "iat")
-                        .put("accent", "mandarin")
-                        .put("ptt", 1)
-                        .put("dwa", "wpgs"));
-            }
-            frame.put("data", data);
-            ws.send(frame.toString());
-        } catch (Exception ignored) {}
-    }
-
-    private void sendAudioEnd(WebSocket ws) {
-        try {
-            JSONObject frame = new JSONObject();
-            frame.put("data", new JSONObject().put("status", 2));
-            ws.send(frame.toString());
-        } catch (Exception ignored) {}
-    }
-
-    /** 解析识别结果：累计 ws[].cw[].w，status==2 时收尾。 */
-    private void handleIatMessage(String text) {
-        try {
-            JSONObject obj = new JSONObject(text);
-            int code = obj.optInt("code", 0);
-            if (code != 0) {
-                final String msg = "识别失败(" + code + ")：" + obj.optString("message", "");
-                runOnUiThread(() -> { cleanupVoice(); voiceError(msg); });
-                return;
-            }
-            JSONObject data = obj.optJSONObject("data");
-            if (data == null) return;
-            JSONObject result = data.optJSONObject("result");
-            if (result != null) {
-                JSONArray wsArr = result.optJSONArray("ws");
-                if (wsArr != null) {
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = 0; i < wsArr.length(); i++) {
-                        JSONArray cwArr = wsArr.optJSONObject(i).optJSONArray("cw");
-                        if (cwArr == null) continue;
-                        for (int j = 0; j < cwArr.length(); j++) {
-                            String w = cwArr.optJSONObject(j).optString("w", "");
-                            if (w != null) sb.append(w);
-                        }
-                    }
-                    // 动态修正（dwa=wpgs）：pgs=rpl 表示替换之前某段结果
-                    String pgs = result.optString("pgs", "");
-                    synchronized (voiceSegments) {
-                        if ("rpl".equals(pgs)) {
-                            JSONArray rgArr = result.optJSONArray("rg");
-                            int start = (rgArr != null && rgArr.length() >= 2) ? rgArr.optInt(0, 1) : 1;
-                            int end = (rgArr != null && rgArr.length() >= 2) ? rgArr.optInt(1, start) : start;
-                            int s = Math.max(0, start - 1);
-                            int e = Math.min(voiceSegments.size(), end);
-                            if (e > s) voiceSegments.subList(s, e).clear();
-                            voiceSegments.add(Math.min(s, voiceSegments.size()), sb.toString());
-                        } else {
-                            voiceSegments.add(sb.toString());
-                        }
-                    }
+            while (generation == voiceGeneration && voiceRunning && !voiceStopRequested) {
+                int read = recorder.read(chunk, 0, chunk.length);
+                if (read > 0) {
+                    int remaining = VOICE_MAX_PCM_BYTES - pcm.size();
+                    if (remaining <= 0) { voiceStopRequested = true; break; }
+                    pcm.write(chunk, 0, Math.min(read, remaining));
+                    if (read > remaining) { voiceStopRequested = true; break; }
+                } else if (read < 0 && read != AudioRecord.ERROR_INVALID_OPERATION) {
+                    throw new IOException("录音读取失败：" + read);
                 }
             }
-            int status = data.optInt("status", -1);
-            final String full = voiceFullText();
-            if (status == 2) {
-                runOnUiThread(() -> {
-                    voiceFinalText = full;
-                    voiceStopRequested = true; // 服务端已结束，停止录音
-                    if (voiceReleased && voiceRunning) finishVoice(full);
-                });
-            } else if (status == 0 || status == 1) {
-                sendVoicePartial(full);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    /** 实时识别中间结果回传页面（用于显示正在识别的文字）。 */
-    private void sendVoicePartial(String text) {
-        runOnUiThread(() -> webView.evaluateJavascript(
-                "window.wechatVoicePartial && window.wechatVoicePartial(" + jsonQuote(text) + ");", null));
-    }
-
-    /** 拼接所有识别片段得到完整文字。 */
-    private String voiceFullText() {
-        synchronized (voiceSegments) {
-            StringBuilder sb = new StringBuilder();
-            for (String s : voiceSegments) sb.append(s);
-            return sb.toString();
+        } catch (Exception e) {
+            if (!voiceCancelled && generation == voiceGeneration) runOnUiThread(() -> voiceError("录音失败：" + safeMessage(e)));
+        } finally {
+            try { recorder.stop(); } catch (Exception ignored) {}
+            try { recorder.release(); } catch (Exception ignored) {}
+            if (audioRecord == recorder) audioRecord = null;
         }
+        if (generation != voiceGeneration || voiceCancelled) return;
+        byte[] raw = pcm.toByteArray();
+        if ((raw.length & 1) != 0) raw = java.util.Arrays.copyOf(raw, raw.length - 1);
+        if (raw.length < 3200) {
+            runOnUiThread(() -> voiceError("录音时间太短"));
+            return;
+        }
+        uploadVoice(makeWav(raw), generation);
+    }
+
+    /** 松开后停止录制；录音线程负责封装并上传。 */
+    private void stopVoiceRecognition() {
+        pendingVoicePermission = false;
+        if (!voiceRunning) return;
+        voiceStopRequested = true;
+        AudioRecord recorder = audioRecord;
+        if (recorder != null) try { recorder.stop(); } catch (Exception ignored) {}
+        voiceProgress("uploading", 0, "正在上传录音…");
+    }
+
+    private void uploadVoice(byte[] wav, int generation) {
+        try {
+            String url = voiceOrigin + "/api/wechat/voice/transcribe?client=" + Uri.encode(clientId());
+            RequestBody body = RequestBody.create(wav, MediaType.get("audio/wav"));
+            Request.Builder builder = new Request.Builder().url(url).post(body).header("Accept", "application/json");
+            if (voiceCookie != null && !voiceCookie.isEmpty()) builder.header("Cookie", voiceCookie);
+            if (!voiceDeviceId.isEmpty()) builder.header("x-whale-device", voiceDeviceId);
+            Call call = voiceHttp.newCall(builder.build());
+            voiceUploadCall = call;
+            voiceProgress("transcribing", 100, "录音已发送，电脑正在离线识别…");
+            call.enqueue(new Callback() {
+                @Override public void onFailure(@NonNull Call call, @NonNull IOException e) {
+                    runOnUiThread(() -> {
+                        if (generation != voiceGeneration || voiceCancelled) return;
+                        voiceUploadCall = null;
+                        voiceError("语音上传失败：" + safeMessage(e));
+                    });
+                }
+                @Override public void onResponse(@NonNull Call call, @NonNull Response response) throws IOException {
+                    String raw = response.body() == null ? "" : response.body().string();
+                    int status = response.code();
+                    response.close();
+                    runOnUiThread(() -> {
+                        if (generation != voiceGeneration || voiceCancelled) return;
+                        voiceUploadCall = null;
+                        try {
+                            JSONObject json = new JSONObject(raw);
+                            if (status >= 200 && status < 300 && json.optBoolean("ok", false)) {
+                                finishVoice(json.optString("text", ""));
+                            } else {
+                                String msg = json.optString("error", status == 503 ? "请先在电脑配对面板安装离线语音模型" : "语音识别失败");
+                                voiceError(msg);
+                            }
+                        } catch (Exception e) {
+                            voiceError(status == 401 ? "公网登录已失效，请重新扫码登录" : "语音服务返回异常");
+                        }
+                    });
+                }
+            });
+        } catch (Exception e) {
+            runOnUiThread(() -> voiceError("无法上传语音：" + safeMessage(e)));
+        }
+    }
+
+    private static byte[] makeWav(byte[] pcm) {
+        byte[] wav = new byte[44 + pcm.length];
+        putAscii(wav, 0, "RIFF"); putLe32(wav, 4, 36 + pcm.length); putAscii(wav, 8, "WAVE");
+        putAscii(wav, 12, "fmt "); putLe32(wav, 16, 16); putLe16(wav, 20, 1); putLe16(wav, 22, 1);
+        putLe32(wav, 24, VOICE_SAMPLE_RATE); putLe32(wav, 28, VOICE_SAMPLE_RATE * 2); putLe16(wav, 32, 2); putLe16(wav, 34, 16);
+        putAscii(wav, 36, "data"); putLe32(wav, 40, pcm.length); System.arraycopy(pcm, 0, wav, 44, pcm.length);
+        return wav;
+    }
+
+    private static void putAscii(byte[] out, int at, String text) {
+        for (int i = 0; i < text.length(); i++) out[at + i] = (byte) text.charAt(i);
+    }
+    private static void putLe16(byte[] out, int at, int value) {
+        out[at] = (byte) value; out[at + 1] = (byte) (value >>> 8);
+    }
+    private static void putLe32(byte[] out, int at, int value) {
+        out[at] = (byte) value; out[at + 1] = (byte) (value >>> 8); out[at + 2] = (byte) (value >>> 16); out[at + 3] = (byte) (value >>> 24);
+    }
+
+    private void voiceProgress(String stage, int percent, String message) {
+        runOnUiThread(() -> webView.evaluateJavascript("window.wechatVoiceProgress && window.wechatVoiceProgress("
+                + jsonQuote(stage) + "," + percent + "," + jsonQuote(message) + ");", null));
     }
 
     private void finishVoice(String text) {
-        if (!voiceRunning) return; // 已发送过，避免重复
-        cleanupVoice();
-        if (voiceCancelled) return; // 上滑取消：不发送
+        if (!voiceRunning || voiceCancelled) return;
+        voiceRunning = false;
+        voiceStopRequested = true;
         if (text == null || text.trim().isEmpty()) { voiceError("没有识别到内容"); return; }
         webView.evaluateJavascript("window.wechatVoiceResult && window.wechatVoiceResult(" + jsonQuote(text.trim()) + ");", null);
     }
 
-    /** 上滑取消：终止识别且不发送。 */
+    /** 上滑取消：终止录音或上传且不发送。 */
     private void cancelVoiceRecognition() {
+        pendingVoicePermission = false;
         voiceCancelled = true;
-        cleanupVoice();
+        voiceRunning = false;
+        voiceStopRequested = true;
+        voiceGeneration++;
+        AudioRecord recorder = audioRecord;
+        if (recorder != null) try { recorder.stop(); } catch (Exception ignored) {}
+        if (voiceUploadCall != null) voiceUploadCall.cancel();
+        voiceUploadCall = null;
     }
 
     private void cleanupVoice() {
-        voiceRunning = false;
-        voiceStopRequested = true;
-        if (audioRecord != null) {
-            try { audioRecord.stop(); } catch (Exception e) {}
-            try { audioRecord.release(); } catch (Exception e) {}
-            audioRecord = null;
-        }
-        if (iatWs != null) {
-            try { iatWs.close(1000, "done"); } catch (Exception e) {}
-            iatWs = null;
-        }
+        voiceHoldActive = false;
+        cancelVoiceRecognition();
     }
 
     /** 语音出错：Toast + 回传页面提示。 */
     private void voiceError(String msg) {
+        voiceRunning = false;
+        voiceStopRequested = true;
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
         webView.evaluateJavascript("window.wechatVoiceError && window.wechatVoiceError(" + jsonQuote(msg) + ");", null);
+    }
+
+    private static String safeMessage(Throwable error) {
+        return error != null && error.getMessage() != null && !error.getMessage().isEmpty() ? error.getMessage() : "未知错误";
+    }
+
+    private static String normalizedOrigin(String raw) {
+        try {
+            URL url = new URL(raw);
+            if (!"http".equalsIgnoreCase(url.getProtocol()) && !"https".equalsIgnoreCase(url.getProtocol())) return "";
+            int port = url.getPort();
+            boolean defaultPort = port < 0 || (port == 80 && "http".equalsIgnoreCase(url.getProtocol())) || (port == 443 && "https".equalsIgnoreCase(url.getProtocol()));
+            return url.getProtocol().toLowerCase(java.util.Locale.US) + "://" + url.getHost().toLowerCase(java.util.Locale.US) + (defaultPort ? "" : ":" + port);
+        } catch (Exception ignored) { return ""; }
     }
 
     private void openGallery(String title, int requestCode) {
@@ -464,9 +472,13 @@ public class MainActivity extends AppCompatActivity {
             pendingScan = false;
         }
         if (requestCode == REC_AUDIO_REQ) {
+            boolean shouldStart = pendingVoicePermission && voiceHoldActive;
+            pendingVoicePermission = false;
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startVoiceRecognition();
+                if (shouldStart) beginVoiceCapture();
+                else voiceError("权限已允许，请重新按住说话");
             } else {
+                voiceHoldActive = false;
                 voiceError("需要麦克风权限才能语音输入");
             }
         }
@@ -518,15 +530,13 @@ public class MainActivity extends AppCompatActivity {
         if (result != null && result.getContents() != null) {
             final String scanned = result.getContents();
             // 记住扫码得到的服务器地址（供下次启动直接进入）
-            try {
-                java.net.URL u = new java.net.URL(scanned);
-                String proto = "https".equals(u.getProtocol()) ? "https" : "http";
-                StringBuilder origin = new StringBuilder(proto).append("://").append(u.getHost());
-                if (u.getPort() > 0) origin.append(":").append(u.getPort());
-                getSharedPreferences("dsh_wechat", MODE_PRIVATE).edit().putString("origin", origin.toString()).apply();
-            } catch (Exception ignored) {}
-            // 直接由原生加载配对链接（不依赖 JS 桥），并带上稳定客户端标识；
-            // 服务器校验令牌后直接下发聊天页
+            String pairedOrigin = normalizedOrigin(scanned);
+            if (pairedOrigin.isEmpty()) {
+                Toast.makeText(this, "二维码不是有效的 HTTP/HTTPS 鲸聊地址", Toast.LENGTH_LONG).show();
+                return;
+            }
+            getSharedPreferences("dsh_wechat", MODE_PRIVATE).edit().putString("origin", pairedOrigin).apply();
+            // 直接由原生加载配对链接（不依赖 JS 桥），并带上稳定客户端标识。
             final String withClient = scanned + (scanned.contains("?") ? "&" : "?") + "client=" + clientId();
             runOnUiThread(() -> webView.loadUrl(withClient));
         } else {
@@ -579,6 +589,12 @@ public class MainActivity extends AppCompatActivity {
     public void onBackPressed() {
         if (webView.canGoBack()) webView.goBack();
         else super.onBackPressed();
+    }
+
+    @Override
+    protected void onStop() {
+        cleanupVoice();
+        super.onStop();
     }
 
     @Override

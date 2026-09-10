@@ -1,52 +1,54 @@
-// 发布自检：验证 npm 打包白名单 + host 模块可被 DSH loader 正确解析。
-// 纯 Node 实现（不派生子进程），零运行时依赖，无网络请求。
-// 用法：npm run verify（在 plugin/ 目录下）
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
-import { join, relative } from 'node:path'
+// 发布自检：真实 npm pack、干净安装、host 导入与浏览器脚本语法检查。
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Script } from 'node:vm'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+const temp = mkdtempSync(join(tmpdir(), 'dsh-wechat-verify-'))
 
-// 1. 递归列出目录下所有文件（相对路径，正斜杠）
-function walk(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
-    const p = join(dir, entry.name)
-    return entry.isDirectory() ? walk(p) : [p]
-  })
-}
-function rel(p) {
-  return relative(root, p).replaceAll('\\', '/')
+function npm(args, cwd) {
+  const npmCli = process.env.npm_execpath
+  const command = npmCli
+    ? spawnSync(process.execPath, [npmCli, ...args], { cwd, encoding: 'utf8', windowsHide: true })
+    : spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, { cwd, encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' })
+  if (command.status !== 0) throw new Error(`npm ${args[0]} 失败:\n${command.stderr || command.stdout}`)
+  return command.stdout
 }
 
-// 2. 计算 npm 会打包的文件集：恒含 package.json + files 白名单 + README/LICENSE
-const patterns = pkg.files ?? []
-const wanted = new Set(['package.json'])
-for (const pat of patterns) {
-  if (pat.endsWith('/')) {
-    for (const f of walk(join(root, pat))) wanted.add(rel(f))
-  } else {
-    wanted.add(pat)
+try {
+  const packed = JSON.parse(npm(['pack', '--json', '--pack-destination', temp], root))
+  if (!Array.isArray(packed) || !packed[0]?.filename) throw new Error('npm pack 没有返回产物')
+  const files = (packed[0].files || []).map(item => item.path.replaceAll('\\', '/'))
+  const required = ['package.json', 'lib/index.js', 'lib/stt.js', 'lib/client.js', 'lib/chat-page.html', 'lib/panel-page.html', 'cordis.patch.yml', 'docs/local-voice.md', 'README.md', 'README.en.md', 'LICENSE']
+  const missing = required.filter(path => !files.includes(path))
+  if (missing.length) throw new Error(`发布包缺少文件: ${missing.join(', ')}`)
+  const leaked = files.filter(path => path.includes('node_modules/') || path.endsWith('.tgz') || path.includes('secrets.properties'))
+  if (leaked.length) throw new Error(`发布包泄漏文件: ${leaked.join(', ')}`)
+  console.log(`pack ok: ${files.join(', ')}`)
+
+  for (const file of ['client.js']) new Script(readFileSync(join(root, 'lib', file), 'utf8'), { filename: file })
+  for (const file of ['chat-page.html', 'panel-page.html']) {
+    const html = readFileSync(join(root, 'lib', file), 'utf8')
+    const match = html.match(/<script>\s*(?:__QRCODE_LIB__)?\s*([\s\S]*?)<\/script>/)
+    if (!match) throw new Error(`${file} 缺少内联脚本`)
+    new Script(match[1], { filename: `${file}.inline.js` })
   }
+  console.log('syntax ok: client and inline page scripts')
+
+  const consumer = join(temp, 'consumer')
+  const tarball = join(temp, packed[0].filename)
+  mkdirSync(consumer, { recursive: true })
+  npm(['init', '-y'], consumer)
+  npm(['install', '--ignore-scripts', '--no-package-lock', tarball], consumer)
+  const installedRoot = join(consumer, 'node_modules', pkg.name)
+  if (!existsSync(join(installedRoot, 'lib', 'stt.js'))) throw new Error('干净安装缺少 stt.js')
+  const mod = await import(pathToFileURL(join(installedRoot, 'lib', 'index.js')).href)
+  if (typeof mod.name !== 'string' || !Array.isArray(mod.inject) || typeof mod.apply !== 'function') throw new Error('host 导出不完整')
+  console.log(`verify ok: ${pkg.name}@${pkg.version} — clean install import succeeded`)
+} finally {
+  rmSync(temp, { recursive: true, force: true })
 }
-
-// 3. 断言每个期望文件都存在，且没有任何 node_modules / *.tgz 泄漏
-const missing = [...wanted].filter(f => !existsSync(join(root, f)))
-if (missing.length) throw new Error(`打包缺少文件: ${missing.join(', ')}`)
-const allFiles = walk(root).map(rel)
-const leaked = allFiles.filter(f => f.includes('node_modules') || f.endsWith('.tgz'))
-if (leaked.length) throw new Error(`打包泄漏了不应包含的文件: ${leaked.join(', ')}`)
-console.log(`pack ok: ${[...wanted].sort().join(', ')}`)
-
-// 4. 语法检查 client 半区（纯脚本，不执行只 parse；host 半区是 ESM，在下一步 import 时解析）
-new Script(readFileSync(join(root, 'lib', 'client.js'), 'utf8'), { filename: 'client.js' })
-console.log('syntax ok: lib/client.js')
-
-// 5. 导入 host 模块，断言导出（name / inject / apply）
-const mod = await import(pathToFileURL(join(root, 'lib', 'index.js')).href)
-if (typeof mod.name !== 'string' || mod.name.length === 0) throw new Error('host 模块缺少 name 导出')
-if (!Array.isArray(mod.inject)) throw new Error('host 模块的 inject 不是数组')
-if (typeof mod.apply !== 'function') throw new Error('host 模块的 apply 不是函数')
-
-console.log(`verify ok: ${pkg.name}@${pkg.version} — name=${mod.name}, inject=[${mod.inject.join(', ')}], apply=function`)

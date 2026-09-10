@@ -4,6 +4,8 @@ node_modules/
 package-lock.json
 *.log
 cloudflared.exe
+vendor-cache/
+stt/
 .smoke-out/
 .e2e-out/
 

@@ -30,6 +30,12 @@
   .security-actions .disable { background:#eee; color:#666; }
   #securityMsg { min-height:15px; margin-top:6px; color:#888; font-size:11px; }
   #securityMsg.err { color:#d0392b; }
+  #sttStatus { color:#d0392b; font-size:12px; font-weight:500; }
+  #sttStatus.on { color:#07a653; }
+  .progress { height:6px; margin-top:8px; overflow:hidden; border-radius:5px; background:#e6e6e6; }
+  .progress > div { width:0; height:100%; background:#07c160; transition:width .25s; }
+  #sttMsg { min-height:15px; margin-top:6px; color:#888; font-size:11px; line-height:1.45; }
+  #sttMsg.err { color:#d0392b; }
   .qr { min-height:190px; display:flex; align-items:center; justify-content:center; }
   .qr svg { image-rendering: pixelated; }
   .linkrow { display:flex; gap:6px; margin-top:8px; }
@@ -70,6 +76,15 @@
       </div>
       <div id="securityMsg">密码只保存在本机；更换后所有公网登录立即失效。</div>
     </section>
+    <section class="security">
+      <div class="security-head"><span>电脑本地语音识别</span><span id="sttStatus">读取中…</span></div>
+      <div class="security-actions">
+        <button class="save" id="sttInstall" onclick="installStt()">安装离线模型</button>
+        <button class="disable" id="sttCancel" onclick="cancelStt()" style="display:none">取消安装</button>
+      </div>
+      <div class="progress"><div id="sttProgress"></div></div>
+      <div id="sttMsg">完全免费且离线；首次安装约需下载 496 MB。</div>
+    </section>
     <div class="qr" id="qr"></div>
     <div class="linkrow"><input id="link" readonly value=""><button onclick="copyLink()">复制链接</button></div>
 
@@ -93,6 +108,11 @@ __QRCODE_LIB__
   var securityMsg = document.getElementById('securityMsg');
   var passwordInput = document.getElementById('securityPassword');
   var confirmInput = document.getElementById('securityConfirm');
+  var sttStatus = document.getElementById('sttStatus');
+  var sttMsg = document.getElementById('sttMsg');
+  var sttProgress = document.getElementById('sttProgress');
+  var sttInstall = document.getElementById('sttInstall');
+  var sttCancel = document.getElementById('sttCancel');
   var tunnelRunning = false;
   var hasQr = false;
 
@@ -150,6 +170,33 @@ __QRCODE_LIB__
   };
 
   loadSecurityStatus();
+
+  function renderStt(info) {
+    info = info || {};
+    var installing = info.phase === 'downloading-runtime' || info.phase === 'downloading-model';
+    sttStatus.textContent = info.ready ? '已就绪' : installing ? '安装中' : info.phase === 'failed' ? '安装失败' : '未安装';
+    sttStatus.className = info.ready ? 'on' : '';
+    sttProgress.style.width = Math.max(0, Math.min(100, Number(info.progress) || 0)) + '%';
+    sttInstall.style.display = info.ready || installing ? 'none' : '';
+    sttCancel.style.display = installing ? '' : 'none';
+    if (info.error) { sttMsg.textContent = info.error; sttMsg.className = 'err'; }
+    else if (info.ready) { sttMsg.textContent = '离线模型已安装，手机语音会在本机转写。'; sttMsg.className = ''; }
+    else if (installing) { sttMsg.textContent = (info.phase === 'downloading-model' ? '正在下载中文多语言模型… ' : '正在下载识别程序… ') + (info.progress || 0) + '%'; sttMsg.className = ''; }
+    else { sttMsg.textContent = '完全免费且离线；首次安装约需下载 496 MB。'; sttMsg.className = ''; }
+  }
+
+  function pollStt() {
+    fetch('/api/whale/stt/status').then(function (r) { return r.json(); }).then(function (r) { if (r && r.ok) renderStt(r.stt); }).catch(function () {});
+    setTimeout(pollStt, 1500);
+  }
+  window.installStt = function () {
+    sttMsg.textContent = '正在开始安装…'; sttMsg.className = '';
+    fetch('/api/whale/stt/install', { method:'POST' }).then(function (r) { return r.json(); }).then(function (r) { renderStt(r.stt); }).catch(function () { sttMsg.textContent='无法开始安装'; sttMsg.className='err'; });
+  };
+  window.cancelStt = function () {
+    fetch('/api/whale/stt/cancel', { method:'POST' }).then(function (r) { return r.json(); }).then(function (r) { renderStt(r.stt); }).catch(function () {});
+  };
+  pollStt();
 
   function renderQR(text) {
     try {

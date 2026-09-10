@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.2** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.3** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -49,19 +49,20 @@ paired device (cookie / header / query) → this plugin's gated /api/wechat/* ro
 ```
 dsh-wechat-chat/
 ├─ plugin/                       # DSH cordis host plugin (installable standalone)
-│  ├─ package.json
+│  ├─ package.json / cordis.patch.yml
 │  ├─ verify-release.mjs         # release self-check: npm pack + clean install + import host module
 │  └─ lib/
-│     ├─ index.js                # routes + session driver + pairing/gating/tunnel + poll push
+│     ├─ index.js                # routes + session driver + pairing/gating/tunnel + voice upload
+│     ├─ stt.js                  # pinned whisper.cpp download, verification, install and local STT
 │     ├─ chat-page.html          # WeChat-style chat page (single file)
 │     ├─ panel-page.html         # PC pairing panel (QR)
 │     ├─ client.js               # client half (sidebar footer entry)
 │     └─ qrcode.js               # bundled qrcode-generator (MIT)
-├─ app/                          # Android project (WebView shell + ZXing + UCrop + system STT)
+├─ app/                          # Android project (records WAV and uploads for local PC STT)
 │  └─ app/src/main/...           # MainActivity.java / layouts / firstrun.html / icons / manifest
 ├─ sdk-fetch.mjs                 # fetch Android SDK packages manually
 ├─ toolchain-setup.ps1           # toolchain extract/install script
-├─ 鲸聊-v1.1.apk                 # prebuilt APK (install directly on the phone)
+├─ 鲸聊-v1.3.apk                 # prebuilt APK (install directly on the phone)
 ├─ README.md / README.en.md / LICENSE / .gitignore
 ```
 
@@ -117,8 +118,8 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   (or restart from the tr
    gradle.bat -p app assembleDebug --no-daemon
    ```
    Output: `app/app/build/outputs/apk/debug/app-debug.apk`.
-2. **Install**: copy the prebuilt `鲸聊-v1.1.apk` to the phone (allow unknown
-   sources), or `adb install 鲸聊-v1.1.apk`.
+2. **Install**: copy the prebuilt `鲸聊-v1.3.apk` to the phone (allow unknown
+   sources), or `adb install 鲸聊-v1.3.apk`.
 3. **Use**: open the pairing panel on the PC → in the app tap "扫一扫连接" to scan →
    auto-pair into the chat. Subsequent launches go straight to the chat.
 
@@ -139,11 +140,20 @@ Plugin `config` in `cordis.patch.yml` (all optional):
 | `tokenTtlMs` | `600000` | pairing token validity (ms) |
 | `idleExpireMs` | `2592000000` | device idle expiry (30 days) |
 | `maxDevices` | `4` | max paired devices |
+| `stt.language` | `zh` | local transcription language: `zh`, `en`, or `auto` |
+| `stt.threads` | `8` | whisper.cpp CPU threads (1–12) |
+| `stt.timeoutMs` | `120000` | per-recording timeout (30–300 seconds) |
 
 **Avatar / background**: tap the avatar in the app to change it (or drop images
 into `$DSH_HOME/wechat-chat/avatars/`: `other.*` assistant avatar, `me.*` your
 avatar, `background.*` chat background).
 **Styling**: edit the CSS in `plugin/lib/chat-page.html` (refresh the page, no restart).
+
+## Free local voice input
+
+Click “Install offline model” in the loopback pairing panel (about 496 MB on first install). The phone records up to 60 seconds as PCM WAV and uploads it through the authenticated tunnel. A pinned whisper.cpp multilingual small model transcribes it on the PC. The text is placed into the input box for review or editing before it is sent to the real DSH session.
+
+Audio is never sent to iFlytek or another STT provider and no API key is needed. Temporary WAV and output files are deleted after success or failure. Runtime and model downloads are pinned by URL, size, and SHA-256; install controls are loopback-only. See [`docs/local-voice.md`](docs/local-voice.md) (Chinese).
 
 ## Notes
 
@@ -160,18 +170,17 @@ npm run verify    # release self-check: syntax check + clean tarball install + i
 
 `verify-release.mjs` runs `npm pack` against the `files` whitelist, installs the
 tarball into a clean temp consumer, and imports the host module — proving the
-publish form resolves itself like the DSH loader would (this plugin has **zero
-runtime dependencies**: only Node built-ins + `ctx` services).
+publish form resolves itself like the DSH loader would, while ensuring the tarball contains no models, recordings, credentials, or build caches.
 
 **Publishing to GitHub**: this repo is the release source. After editing,
 `git add -A && git commit && git push`. The `files` whitelist and `.gitignore`
 already exclude `node_modules`, `*.tgz`, `package-lock.json`, Gradle build
 outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
-`鲸聊-v1.1.apk` is kept in the repo.
+`鲸聊-v1.3.apk` is kept in the repo.
 
 ## Known limitations
 
-- Text only: the phone sends/receives plain text; code blocks / markdown render as plain text.
+- Chat payloads are text only: voice is transcribed locally before sending; code blocks / markdown render as plain text.
 - One at a time: sending while a turn is running is rejected (409); the top-right
   status shows progress. The cancel button is not yet exposed in the UI
   (the `/api/wechat/cancel` endpoint exists).

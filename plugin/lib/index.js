@@ -26,6 +26,7 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import { createServer, request as httpRequest } from 'node:http'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { LocalSttManager } from './stt.js'
 
 export const name = 'wechat-chat'
 export const inject = ['sessionController', 'webServer']
@@ -163,6 +164,33 @@ function readJsonBody(req, maxBytes) {
     })
     req.on('end', finish)
     req.on('error', () => resolve(null))
+  })
+}
+
+function readRawBody(req, maxBytes) {
+  return new Promise((resolve) => {
+    const chunks = []
+    let size = 0
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    req.on('data', (chunk) => {
+      if (settled) return
+      size += chunk.length
+      if (size > maxBytes) {
+        finish({ ok: false, tooLarge: true })
+        req.removeAllListeners('data')
+        req.resume()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => finish({ ok: true, buffer: Buffer.concat(chunks) }))
+    req.on('error', () => finish({ ok: false, error: true }))
+    req.setTimeout?.(30_000, () => finish({ ok: false, timeout: true }))
   })
 }
 
@@ -889,6 +917,8 @@ export function apply(ctx, config = {}) {
   const tunnel = new TunnelManager(`http://127.0.0.1:${webPort}`)
   // 即使暂未设置密码，也始终通过路径白名单网关，避免暴露整个 DSH Web。
   const authGateway = new TunnelAuthGateway(webPort, tunnelPasswordHash)
+  const stt = new LocalSttManager(join(home, 'wechat-chat', 'stt'), config.stt || {})
+  const voiceLanguage = config.stt && ['auto', 'zh', 'en'].includes(config.stt.language) ? config.stt.language : 'zh'
   tunnel.onPhase((info) => {
     tunnelBase = info.phase === 'running' && typeof info.url === 'string' && info.url !== '' ? info.url : undefined
   })
@@ -896,6 +926,8 @@ export function apply(ctx, config = {}) {
   const running = new Map() // deviceKey -> { ac, sessionId }
   const streams = new Map() // deviceId -> Set<{res, closed, keep}>
   const eventQueues = new Map() // deviceKey -> { seq, events: [{seq, payload}] }
+  const lastVoiceAt = new Map() // authenticated device id -> last accepted upload time
+  let voiceUploadActive = false // reserve before buffering to cap memory and transcription concurrency
 
   const lanHosts = () => lanIPv4Addresses()
   const trustedHosts = () => {
@@ -920,7 +952,9 @@ export function apply(ctx, config = {}) {
   /** Non-loopback /api/wechat gate: a live device cookie is the access control. */
   const gateOk = (req, queryDevice) => {
     if (isLoopbackRequest(req)) return true
-    const id = queryDevice || deviceIdOf(req)
+    const credential = deviceIdOf(req)
+    if (credential !== undefined && queryDevice !== undefined && credential !== queryDevice) return false
+    const id = credential || queryDevice
     if (id === undefined) return false
     return service.touchDevice(id)
   }
@@ -1161,6 +1195,25 @@ export function apply(ctx, config = {}) {
       return
     }
 
+    if (pathname === '/api/whale/stt/status') {
+      if (!loopbackFence(req) || req.method !== 'GET') { writeJson(res, req.method === 'GET' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
+      writeJson(res, 200, { ok: true, stt: stt.info() })
+      return
+    }
+
+    if (pathname === '/api/whale/stt/install') {
+      if (!loopbackFence(req) || req.method !== 'POST') { writeJson(res, req.method === 'POST' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
+      const started = stt.startInstall()
+      writeJson(res, started ? 202 : 409, { ok: started, stt: stt.info(), ...(started ? {} : { error: stt.ready() ? '离线模型已经安装' : '安装已在进行中' }) })
+      return
+    }
+
+    if (pathname === '/api/whale/stt/cancel') {
+      if (!loopbackFence(req) || req.method !== 'POST') { writeJson(res, req.method === 'POST' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
+      writeJson(res, 200, { ok: true, cancelled: stt.cancelInstall(), stt: stt.info() })
+      return
+    }
+
     if (pathname === '/api/whale/pair/issue') {
       if (!loopbackFence(req) || req.method !== 'POST') { writeJson(res, req.method === 'POST' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
       // 只走公网：隧道优先，其次手动 publicBaseUrl
@@ -1251,8 +1304,10 @@ export function apply(ctx, config = {}) {
     const pathname = url.pathname
     const queryDevice = url.searchParams.get('device') || undefined
     const client = url.searchParams.get('client') || undefined
-    const device = queryDevice || deviceIdOf(req) || undefined
-    const key = client || device || undefined
+    const credentialDevice = deviceIdOf(req) || undefined
+    const device = credentialDevice || queryDevice
+    // A client id is only a continuity hint inside one authenticated device boundary.
+    const key = device ? `${device}:${client || 'default'}` : undefined
 
     if (pathname === '/api/wechat/avatar/other' || pathname === '/api/wechat/avatar/me') {
       if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
@@ -1353,6 +1408,39 @@ export function apply(ctx, config = {}) {
       return
     }
 
+    if (pathname === '/api/wechat/voice/transcribe') {
+      if (req.method !== 'POST') { writeJson(res, 405, { ok: false, code: 'method-not-allowed' }); return }
+      if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
+      if (!device || !key) { writeJson(res, 400, { ok: false, code: 'missing-device', error: '缺少设备凭据' }); return }
+      const type = String(req.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase()
+      if (type !== 'audio/wav' && type !== 'audio/x-wav') { writeJson(res, 415, { ok: false, code: 'unsupported-format', error: '仅支持 PCM WAV 录音' }); return }
+      const declared = Number(req.headers['content-length'])
+      if (Number.isFinite(declared) && declared > 2_100_000) { writeJson(res, 413, { ok: false, code: 'too-large', error: '录音不能超过 60 秒' }); return }
+      const now = Date.now()
+      if (now - (lastVoiceAt.get(key) || 0) < 2_000) { writeJson(res, 429, { ok: false, code: 'rate-limited', error: '语音请求过于频繁' }); return }
+      if (stt.busy) { writeJson(res, 429, { ok: false, code: 'stt-busy', error: '电脑正在识别另一条语音，请稍后重试' }); return }
+      if (voiceUploadActive) { writeJson(res, 429, { ok: false, code: 'upload-busy', error: '正在处理另一段录音上传，请稍后重试' }); return }
+      voiceUploadActive = true
+      try {
+        const body = await readRawBody(req, 2_100_000)
+        if (!body.ok) {
+          const status = body.tooLarge ? 413 : body.timeout ? 408 : 400
+          writeJson(res, status, { ok: false, code: body.tooLarge ? 'too-large' : body.timeout ? 'upload-timeout' : 'bad-upload', error: '录音上传失败' })
+          return
+        }
+        lastVoiceAt.set(key, now)
+        const result = await stt.transcribe(body.buffer, voiceLanguage)
+        writeJson(res, 200, { ok: true, text: result.text, durationMs: result.durationMs, elapsedMs: result.elapsedMs })
+      } catch (error) {
+        const code = error && error.code
+        const status = code === 'not-ready' ? 503 : code === 'busy' ? 429 : code === 'timeout' ? 504 : code === 'no-speech' ? 422 : 400
+        writeJson(res, status, { ok: false, code: code || 'transcribe-failed', error: (error && error.message) || '语音识别失败' })
+      } finally {
+        voiceUploadActive = false
+      }
+      return
+    }
+
     if (pathname === '/api/wechat/state') {
       if (!gateOk(req, queryDevice)) { writeJson(res, 403, { ok: false, code: 'unpaired' }); return }
       if (!device) { writeJson(res, 200, { ok: true, paired: false }); return }
@@ -1364,6 +1452,7 @@ export function apply(ctx, config = {}) {
         ok: true, paired: true, nickname: (loadNickname() || defaultNickname), busy: running.has(key),
         avatarOther: '/api/wechat/avatar/other', avatarMe: '/api/wechat/avatar/me',
         ...(hasBg ? { background: '/api/wechat/background' } : {}),
+        stt: stt.info(),
         hiddenIds: hiddenIdsOf(key),
       }
       try {
@@ -1501,6 +1590,7 @@ export function apply(ctx, config = {}) {
       clearInterval(timer)
       tunnel.dispose()
       authGateway.stop()
+      stt.dispose()
     }
   }, 'wechat-chat: routes')
 

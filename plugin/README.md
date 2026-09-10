@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.2** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.3** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -43,22 +43,23 @@
 ```
 dsh-wechat-chat/
 ├─ plugin/                       # DSH cordis host 插件（可独立安装）
-│  ├─ package.json
+│  ├─ package.json / cordis.patch.yml
 │  ├─ verify-release.mjs         # 发布自检：npm pack + 干净安装 + 导入 host 模块
 │  └─ lib/
-│     ├─ index.js                # 路由 + 会话驱动 + 配对/门控/公网隧道 + 轮询推送
+│     ├─ index.js                # 路由 + 会话驱动 + 配对/门控/公网隧道 + 语音上传
+│     ├─ stt.js                  # whisper.cpp 固定下载、校验、安装与离线转写
 │     ├─ chat-page.html          # 微信风聊天页（单文件）
 │     ├─ panel-page.html         # 电脑端配对面板（二维码）
 │     ├─ client.js               # client 半区（官方侧栏底部入口）
 │     └─ qrcode.js               # 内置 qrcode-generator（MIT）
-├─ app/                          # 安卓工程（WebView 壳 + ZXing 扫码 + UCrop + 系统语音识别）
+├─ app/                          # 安卓工程（录制 WAV 并上传到电脑离线转写）
 │  ├─ settings.gradle / build.gradle / gradle.properties
 │  └─ app/
-│     ├─ build.gradle            # applicationId com.dsh.wechat · versionName 1.1
+│     ├─ build.gradle            # applicationId com.dsh.wechat · versionName 1.3
 │     └─ src/main/               # MainActivity.java / 布局 / firstrun.html / 图标 / 清单
 ├─ sdk-fetch.mjs                 # 手动拉取 Android SDK 包（绕开 sdkmanager 网络问题）
 ├─ toolchain-setup.ps1           # 工具链解压/安装脚本
-├─ 鲸聊-v1.1.apk                 # 已编译成品（直接安装到手机）
+├─ 鲸聊-v1.3.apk                 # 已编译成品（直接安装到手机）
 ├─ README.md / README.en.md / LICENSE / .gitignore
 ```
 
@@ -115,8 +116,8 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
    gradle.bat -p app assembleDebug --no-daemon
    ```
    产物：`app/app/build/outputs/apk/debug/app-debug.apk`。
-2. **安装**：直接把仓库里的 `鲸聊-v1.1.apk` 拷到手机安装（需允许未知来源），或
-   `adb install 鲸聊-v1.1.apk`。
+2. **安装**：直接把仓库里的 `鲸聊-v1.3.apk` 拷到手机安装（需允许未知来源），或
+   `adb install 鲸聊-v1.3.apk`。
 3. **使用**：电脑端「远程访问」面板生成二维码 → 手机 App 首次启动点「扫一扫连接」扫码 →
    自动配对进入聊天。以后打开 App 直接进聊天。
 
@@ -137,10 +138,19 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
 | `tokenTtlMs` | `600000` | 配对令牌有效期（毫秒） |
 | `idleExpireMs` | `2592000000` | 设备闲置失效（30 天） |
 | `maxDevices` | `4` | 最大配对设备数 |
+| `stt.language` | `zh` | 本地转写语言，可选 `zh` / `en` / `auto` |
+| `stt.threads` | `8` | whisper.cpp CPU 线程数（1–12） |
+| `stt.timeoutMs` | `120000` | 单次本地转写超时（30–300 秒） |
 
 **头像 / 背景**：手机 App 内点头像即可修改（或把图片放到 `$DSH_HOME/wechat-chat/avatars/`：
 `other.*` 对方头像、`me.*` 自己头像、`background.*` 聊天背景）。
 **界面样式**：改 `plugin/lib/chat-page.html` 内的 CSS（改动后刷新页面即可，无需重启）。
+
+## 免费本地语音输入
+
+在本机配对面板点击「安装离线模型」（首次约下载 496 MB）。手机按住录音后会把最多 60 秒的 PCM WAV 通过已认证隧道上传到电脑，由固定版本的 whisper.cpp multilingual small 模型离线转写。文字先进入输入框，确认或修改后才会发送到真实 DSH 会话。
+
+录音不会发送给讯飞或其他第三方，不需要 API Key；临时 WAV 与输出在转写完成或失败后删除。运行库与模型均固定 URL、大小和 SHA-256，安装接口仅允许本机访问。详见 [`docs/local-voice.md`](docs/local-voice.md)。
 
 ## 注意事项
 
@@ -165,12 +175,11 @@ npm run verify    # 发布自检：node 语法检查 + 干净 tarball 安装 + �
 ```
 
 `verify-release.mjs` 会按 `package.json` 的 `files` 白名单 `npm pack`，装进干净临时目录，
-再 `import` host 模块，证明发布产物能像 DSH loader 一样解析自身（本插件零运行时依赖，
-仅用 Node 内建模块 + `ctx` 服务）。
+再 `import` host 模块，证明发布产物能像 DSH loader 一样解析自身；同时检查发布包不含模型、录音、密钥或构建缓存。
 
 **发布到 GitHub**：本仓库即发布源；改完源码后 `git add -A && git commit && git push`。
 `files` 白名单与 `.gitignore` 已排除 `node_modules`、`*.tgz`、`package-lock.json`、Gradle
-构建产物、`local.properties` 与运行时用户数据（`avatars/`），成品 `鲸聊-v1.1.apk` 保留在仓库。
+构建产物、`local.properties` 与运行时用户数据（`avatars/`），成品 `鲸聊-v1.3.apk` 保留在仓库。
 
 ## 安全
 

@@ -1,5 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
-<WebView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/webview"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent" />
+    android:layout_height="match_parent">
+
+    <WebView
+        android:id="@+id/webview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Native-only consent surface: JavaScript may show/hide it but cannot start recording. -->
+    <TextView
+        android:id="@+id/native_voice_button"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="58dp"
+        android:layout_marginEnd="58dp"
+        android:layout_marginBottom="7dp"
+        android:background="#F5F5F5"
+        android:gravity="center"
+        android:text="按住 说话（电脑离线识别）"
+        android:textColor="#222222"
+        android:textSize="14sp"
+        android:visibility="gone" />
+</FrameLayout>
