@@ -140,6 +140,9 @@ public class MainActivity extends AppCompatActivity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 if ("file".equalsIgnoreCase(uri.getScheme())) return false;
+                // QR 扫码配对链接（含 pair= 令牌）允许通过，即使 origin 与已保存的不同
+                String pairToken = uri.getQueryParameter("pair");
+                if (pairToken != null && !pairToken.isEmpty()) return false;
                 String saved = getSharedPreferences("dsh_wechat", MODE_PRIVATE).getString("origin", "");
                 String target = normalizedOrigin(uri.toString());
                 if (!saved.isEmpty() && saved.equals(target)) return false;

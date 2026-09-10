@@ -934,20 +934,30 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
   var voiceMode = false;
   var voiceActive = false;
   var sttReady = false;
+  var useNativeVoice = !!(window.WechatBridge && window.WechatBridge.setNativeVoiceVisible);
   function setVoiceMode(on) {
     voiceMode = on;
     if (on) {
       voiceBtn.classList.add('voice-mode');
       input.style.display = 'none';
       sendBtn.style.display = 'none';
-      holdTalk.classList.add('show');
+      if (useNativeVoice) {
+        // 新 APK：显示原生按钮，原生处理触控录音
+        try { window.WechatBridge.setNativeVoiceVisible(true); } catch (err) {}
+      } else {
+        // 旧 APK：显示 JS holdTalk
+        holdTalk.classList.add('show');
+      }
     } else {
       voiceBtn.classList.remove('voice-mode');
       input.style.display = '';
       sendBtn.style.display = '';
-      holdTalk.classList.remove('show');
+      if (useNativeVoice) {
+        try { window.WechatBridge.setNativeVoiceVisible(false); } catch (err) {}
+      } else {
+        holdTalk.classList.remove('show');
+      }
     }
-    try { if (window.WechatBridge && window.WechatBridge.setNativeVoiceVisible) window.WechatBridge.setNativeVoiceVisible(!!on); } catch (err) {}
   }
   voiceBtn.addEventListener('click', function () { setVoiceMode(!voiceMode); });
 
@@ -970,52 +980,55 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
       voiceHintLabel.textContent = '正在识别，松开结束';
     }
   }
-  holdTalk.addEventListener('touchstart', function (e) {
-    e.preventDefault();
-    if (voiceActive) return;
-    if (!sttReady) { toastText('请先在电脑配对面板安装离线语音模型'); return; }
-    voiceActive = true;
-    var t = e.touches[0];
-    voiceStartY = t.clientY;
-    voiceCancelling = false;
-    voiceHint.classList.remove('cancelling');
-    voiceHintText.textContent = '';
-    voiceHintLabel.textContent = '正在识别，松开结束';
-    voiceCancelHintText.textContent = '上滑取消';
-    holdTalk.classList.add('recording');
-    showVoiceHint(true);
-    try { if (window.WechatBridge && window.WechatBridge.startVoice) window.WechatBridge.startVoice(deviceId || ''); else throw new Error('bridge unavailable'); }
-    catch (err) { voiceActive = false; showVoiceHint(false); toastText('当前环境不支持语音输入'); }
-  });
-  holdTalk.addEventListener('touchmove', function (e) {
-    var y = e.touches[0].clientY;
-    if (voiceStartY - y > 60) {
-      if (!voiceCancelling) setVoiceCancelling(true);
-    } else {
-      if (voiceCancelling) setVoiceCancelling(false);
-    }
-  });
-  holdTalk.addEventListener('touchend', function (e) {
-    e.preventDefault();
-    holdTalk.classList.remove('recording');
-    if (voiceCancelling) {
+
+  // 新 APK：原生按钮触控录音，JS 只负责显示/隐藏按钮和接收转写结果
+  // 旧 APK 兼容：holdTalk 触控 + 旧桥接方法
+  if (!useNativeVoice) {
+    holdTalk.addEventListener('touchstart', function (e) {
+      e.preventDefault();
+      if (voiceActive) return;
+      if (!sttReady) { toastText('请先升级 APK 至最新版本'); return; }
+      voiceActive = true;
+      var t = e.touches[0];
+      voiceStartY = t.clientY;
+      voiceCancelling = false;
+      voiceHint.classList.remove('cancelling');
+      voiceHintText.textContent = '';
+      voiceHintLabel.textContent = '正在识别，松开结束';
+      voiceCancelHintText.textContent = '上滑取消';
+      holdTalk.classList.add('recording');
+      showVoiceHint(true);
+      try { if (window.WechatBridge && window.WechatBridge.startVoice) window.WechatBridge.startVoice(); else throw new Error('bridge unavailable'); }
+      catch (err) { voiceActive = false; showVoiceHint(false); toastText('请升级 APK 至最新版本'); }
+    });
+    holdTalk.addEventListener('touchmove', function (e) {
+      var y = e.touches[0].clientY;
+      if (voiceStartY - y > 60) {
+        if (!voiceCancelling) setVoiceCancelling(true);
+      } else {
+        if (voiceCancelling) setVoiceCancelling(false);
+      }
+    });
+    holdTalk.addEventListener('touchend', function (e) {
+      e.preventDefault();
+      holdTalk.classList.remove('recording');
+      if (voiceCancelling) {
+        voiceActive = false;
+        showVoiceHint(false);
+        try { if (window.WechatBridge && window.WechatBridge.cancelVoice) window.WechatBridge.cancelVoice(); } catch (err) {}
+      } else {
+        try { if (window.WechatBridge && window.WechatBridge.stopVoice) window.WechatBridge.stopVoice(); } catch (err) {}
+      }
+      voiceCancelling = false;
+    });
+    holdTalk.addEventListener('touchcancel', function () {
+      holdTalk.classList.remove('recording');
       voiceActive = false;
       showVoiceHint(false);
       try { if (window.WechatBridge && window.WechatBridge.cancelVoice) window.WechatBridge.cancelVoice(); } catch (err) {}
-    } else {
-      voiceHintLabel.textContent = '正在上传录音';
-      voiceHintText.textContent = '随后将在电脑本地离线识别';
-      try { if (window.WechatBridge && window.WechatBridge.stopVoice) window.WechatBridge.stopVoice(); } catch (err) {}
-    }
-    voiceCancelling = false;
-  });
-  holdTalk.addEventListener('touchcancel', function () {
-    holdTalk.classList.remove('recording');
-    voiceActive = false;
-    showVoiceHint(false);
-    try { if (window.WechatBridge && window.WechatBridge.cancelVoice) window.WechatBridge.cancelVoice(); } catch (err) {}
-    voiceCancelling = false;
-  });
+      voiceCancelling = false;
+    });
+  }
 
   window.wechatVoiceProgress = function (stage, percent, message) {
     showVoiceHint(true);
