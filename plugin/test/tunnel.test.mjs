@@ -51,9 +51,13 @@ test('info 仅在拿到地址后暴露 connected', () => {
     phase: 'stopped',
     url: 'https://example.trycloudflare.com',
     connected: true,
+    published: false,
   })
+  manager.published = true
+  assert.equal(manager.info().published, true)
   manager.stop()
   assert.equal(manager.connected, false)
+  assert.equal(manager.published, false)
   assert.deepEqual(manager.info(), { phase: 'stopped' })
 })
 

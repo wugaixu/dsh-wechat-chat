@@ -704,6 +704,37 @@ const CLOUDFLARED_BIN = join(home, 'wechat-chat', process.platform === 'win32' ?
 const TUNNEL_READY_INTERVAL_MS = 1_500
 // 连接器持续未能就绪多久后重建隧道（重建会换地址，尽量少换）。
 const TUNNEL_REBUILD_AFTER_MS = 60_000
+// Cloudflare 偶尔会先注册连接器、稍后才发布隧道的 DNS 记录（实测可能等 1~3 分钟）：
+// 期间手机解析该域名会得到 NXDOMAIN（浏览器报 ERR_NAME_NOT_RESOLVED），所以出码前
+// 必须确认域名已发布。两个要点：
+//   1) 任一解析器返回 Status=0 且有 A 记录即算已发布；
+//   2) 解析器会缓存 NXDOMAIN（否定缓存）—— 刚创建时查过一次就会一直返回 NXDOMAIN，
+//      所以必须挑"结果新且本机可达"的解析器：实测 doh.pub 可靠，阿里常给旧答案。
+const TUNNEL_DOH_ENDPOINTS = [
+  'https://doh.pub/dns-query',
+  'https://dns.alidns.com/resolve',
+  'https://dns.google/resolve',
+]
+
+/** 该域名是否已在公网 DNS 发布（Status=0 且存在 A 记录）。 */
+export async function tunnelNamePublished(hostname, endpoints = TUNNEL_DOH_ENDPOINTS) {
+  if (typeof hostname !== 'string' || hostname === '') return false
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(`${endpoint}?name=${encodeURIComponent(hostname)}&type=A`, {
+        signal: AbortSignal.timeout(4_000),
+        headers: { accept: 'application/dns-json', 'user-agent': 'dsh-wechat-chat-publish' },
+      })
+      if (!res.ok) continue
+      const body = await res.json()
+      if (Number(body && body.Status) === 0 && Array.isArray(body.Answer)
+          && body.Answer.some(item => item && Number(item.type) === 1 && typeof item.data === 'string')) {
+        return true
+      }
+    } catch { /* 换下一个解析器 */ }
+  }
+  return false
+}
 
 /** 找一个空闲的回环端口，交给 cloudflared 作为本地 metrics/ready 端口。 */
 function freeLoopbackPort() {
@@ -745,6 +776,10 @@ export class TunnelManager {
     this.readyTimer = undefined
     this.readySince = undefined
     this.metricsPort = undefined
+    // 隧道域名是否已被公网 DNS 发布（未发布则手机一定连不上）
+    this.published = false
+    this.publishedSince = undefined
+    this.publishTimer = undefined
     this.handle = undefined
     this.timers = []
     this.generation = 0
@@ -762,8 +797,36 @@ export class TunnelManager {
       phase: this.phase,
       ...(this.url !== undefined ? { url: this.url } : {}),
       ...(this.url !== undefined ? { connected: this.connected } : {}),
+      ...(this.url !== undefined ? { published: this.published } : {}),
       ...(this.error !== undefined ? { error: this.error } : {}),
     }
+  }
+
+  schedulePublish(delayMs) {
+    clearTimeout(this.publishTimer)
+    this.publishTimer = setTimeout(() => { void this.runPublishCheck() }, delayMs)
+  }
+
+  /**
+   * 确认隧道域名已在公网发布。Cloudflare 发布新的快隧道域名可能要 1~3 分钟，
+   * 所以这里**只耐心等待、绝不重建**：重建会换域名并重新排队，反而永远等不到发布。
+   * 只有连接器连不上边缘（runReadyCheck）才值得重建。
+   */
+  async runPublishCheck() {
+    if (this.stopping || this.phase !== 'running' || this.url === undefined) return
+    const hostname = String(this.url).replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    const ok = await tunnelNamePublished(hostname)
+    if (this.stopping || this.phase !== 'running') return
+    if (ok) {
+      this.publishedSince = undefined
+      if (!this.published) { this.published = true; this.emit() }
+      this.schedulePublish(30_000)
+      return
+    }
+    if (this.publishedSince === undefined) this.publishedSince = Date.now()
+    // 前 2 分钟每 5 秒看一次，之后每 20 秒看一次；始终复用同一个域名
+    const waited = Date.now() - this.publishedSince
+    this.schedulePublish(waited < 120_000 ? 5_000 : 20_000)
   }
 
   /**
@@ -836,6 +899,8 @@ export class TunnelManager {
     this.connected = false
     this.readyFailures = 0
     this.readySince = undefined
+    this.published = false
+    this.publishedSince = undefined
     this.setPhase('stopped')
   }
 
@@ -867,8 +932,11 @@ export class TunnelManager {
         this.connected = false
         this.readyFailures = 0
         this.readySince = undefined
+        this.published = false
+        this.publishedSince = undefined
         this.setPhase('running')
         this.scheduleReady(500)
+        this.schedulePublish(1_000)
       })
       handle.on('exit', () => {
         if (this.handle !== handle) return
@@ -892,7 +960,10 @@ export class TunnelManager {
     this.connected = false
     this.readyFailures = 0
     this.readySince = undefined
+    this.published = false
+    this.publishedSince = undefined
     clearTimeout(this.readyTimer)
+    clearTimeout(this.publishTimer)
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }
       this.handle = undefined
@@ -910,6 +981,8 @@ export class TunnelManager {
     this.timers = []
     clearTimeout(this.readyTimer)
     this.readyTimer = undefined
+    clearTimeout(this.publishTimer)
+    this.publishTimer = undefined
     if (this.handle !== undefined) {
       try { this.handle.stop() } catch { /* best effort */ }
       this.handle = undefined
@@ -1444,10 +1517,14 @@ export function apply(ctx, config = {}) {
         writeJson(res, 409, { ok: false, code: 'tunnel-required', error: '公网隧道未就绪或未配置公网地址' })
         return
       }
-      // 连接器未注册到 Cloudflare 边缘时才拒绝（本地判定，毫秒级）；
-      // 公网探测慢且受本机代理影响，仅作为面板上的参考信息，不阻塞出码。
+      // 出码条件：连接器已注册到边缘，且域名确实已在公网发布。
+      // 只注册连接器而没发布 DNS 时，手机解析该域名会得到 NXDOMAIN，务必挡住。
       if (base === tunnelBase && !tunnel.connected) {
         writeJson(res, 409, { ok: false, code: 'tunnel-not-connected', error: '公网隧道还在连接 Cloudflare，请稍候几秒', tunnel: tunnel.info() })
+        return
+      }
+      if (base === tunnelBase && !tunnel.published) {
+        writeJson(res, 409, { ok: false, code: 'tunnel-not-published', error: 'Cloudflare 还没发布该隧道域名，正在重试；稍候再刷新二维码', tunnel: tunnel.info() })
         return
       }
       const { token, expiresAt } = service.issue()

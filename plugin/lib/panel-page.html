@@ -253,6 +253,11 @@ __QRCODE_LIB__
             tunnelRunning = false;
             tunEl.textContent = '公网隧道正在连接 Cloudflare… ' + t.url;
             tunEl.className = '';
+          } else if (t.published !== true) {
+            // 连接器已就绪、但 Cloudflare 还没发布域名：耐心等待，不要重建隧道
+            tunnelRunning = false;
+            tunEl.textContent = 'Cloudflare 正在发布隧道域名，请稍候（可能需 1~3 分钟）… ' + t.url;
+            tunEl.className = '';
           } else {
             tunnelRunning = true;
             tunEl.textContent = '公网隧道已连接 ' + t.url;

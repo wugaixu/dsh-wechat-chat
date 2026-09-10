@@ -1326,7 +1326,10 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
         if (m.role !== 'user' || typeof m.text !== 'string' || m.text.indexOf('【语音】') !== 0) continue;
         var rec = queue[used];
         if (!rec) break;
+        // 队列必须按顺序消费，否则删除过的语音条会与后面的记录错位
         used += 1;
+        // 已删除（隐藏）的语音条不再重建：否则刷新后会被重新画出来
+        if (m.id && hiddenSet[m.id]) continue;
         voiceRecords[rec.id] = rec;
         pendingVoiceRenders.push({ id: rec.id, msgId: m.id, rec: rec });
       }
@@ -1339,6 +1342,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     for (var i = 0; i < pendingVoiceRenders.length; i++) {
       var p = pendingVoiceRenders[i];
       if (voiceRows[p.id]) continue;
+      if (p.msgId && hiddenSet[p.msgId]) continue;
       addVoiceRow(p.rec, { id: p.msgId });
     }
     pendingVoiceRenders = [];
