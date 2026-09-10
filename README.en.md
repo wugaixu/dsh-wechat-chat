@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.3** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.4** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -62,7 +62,7 @@ dsh-wechat-chat/
 │  └─ app/src/main/...           # MainActivity.java / layouts / firstrun.html / icons / manifest
 ├─ sdk-fetch.mjs                 # fetch Android SDK packages manually
 ├─ toolchain-setup.ps1           # toolchain extract/install script
-├─ 鲸聊-v1.3.apk                 # prebuilt APK (install directly on the phone)
+├─ 鲸聊-v1.4.3.apk                 # prebuilt APK (install directly on the phone)
 ├─ README.md / README.en.md / LICENSE / .gitignore
 ```
 
@@ -118,8 +118,8 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   (or restart from the tr
    gradle.bat -p app assembleDebug --no-daemon
    ```
    Output: `app/app/build/outputs/apk/debug/app-debug.apk`.
-2. **Install**: copy the prebuilt `鲸聊-v1.3.apk` to the phone (allow unknown
-   sources), or `adb install 鲸聊-v1.3.apk`.
+2. **Install**: copy the prebuilt `鲸聊-v1.4.3.apk` to the phone (allow unknown
+   sources), or `adb install 鲸聊-v1.4.3.apk`.
 3. **Use**: open the pairing panel on the PC → in the app tap "扫一扫连接" to scan →
    auto-pair into the chat. Subsequent launches go straight to the chat.
 
@@ -176,7 +176,7 @@ publish form resolves itself like the DSH loader would, while ensuring the tarba
 `git add -A && git commit && git push`. The `files` whitelist and `.gitignore`
 already exclude `node_modules`, `*.tgz`, `package-lock.json`, Gradle build
 outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
-`鲸聊-v1.3.apk` is kept in the repo.
+`鲸聊-v1.4.3.apk` is kept in the repo.
 
 ## Known limitations
 

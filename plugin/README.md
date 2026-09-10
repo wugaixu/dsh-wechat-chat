@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.3** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.4** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -55,11 +55,11 @@ dsh-wechat-chat/
 ├─ app/                          # 安卓工程（录制 WAV 并上传到电脑离线转写）
 │  ├─ settings.gradle / build.gradle / gradle.properties
 │  └─ app/
-│     ├─ build.gradle            # applicationId com.dsh.wechat · versionName 1.3
+│     ├─ build.gradle            # applicationId com.dsh.wechat · versionName 1.4.3
 │     └─ src/main/               # MainActivity.java / 布局 / firstrun.html / 图标 / 清单
 ├─ sdk-fetch.mjs                 # 手动拉取 Android SDK 包（绕开 sdkmanager 网络问题）
 ├─ toolchain-setup.ps1           # 工具链解压/安装脚本
-├─ 鲸聊-v1.3.apk                 # 已编译成品（直接安装到手机）
+├─ 鲸聊-v1.4.3.apk                 # 已编译成品（直接安装到手机）
 ├─ README.md / README.en.md / LICENSE / .gitignore
 ```
 
@@ -116,8 +116,8 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
    gradle.bat -p app assembleDebug --no-daemon
    ```
    产物：`app/app/build/outputs/apk/debug/app-debug.apk`。
-2. **安装**：直接把仓库里的 `鲸聊-v1.3.apk` 拷到手机安装（需允许未知来源），或
-   `adb install 鲸聊-v1.3.apk`。
+2. **安装**：直接把仓库里的 `鲸聊-v1.4.3.apk` 拷到手机安装（需允许未知来源），或
+   `adb install 鲸聊-v1.4.3.apk`。
 3. **使用**：电脑端「远程访问」面板生成二维码 → 手机 App 首次启动点「扫一扫连接」扫码 →
    自动配对进入聊天。以后打开 App 直接进聊天。
 
@@ -186,7 +186,7 @@ npm run verify    # 发布自检：node 语法检查 + 干净 tarball 安装 + �
 
 **发布到 GitHub**：本仓库即发布源；改完源码后 `git add -A && git commit && git push`。
 `files` 白名单与 `.gitignore` 已排除 `node_modules`、`*.tgz`、`package-lock.json`、Gradle
-构建产物、`local.properties` 与运行时用户数据（`avatars/`），成品 `鲸聊-v1.3.apk` 保留在仓库。
+构建产物、`local.properties` 与运行时用户数据（`avatars/`），成品 `鲸聊-v1.4.3.apk` 保留在仓库。
 
 ## 安全
 
