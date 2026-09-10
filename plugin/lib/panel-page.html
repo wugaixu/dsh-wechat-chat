@@ -17,6 +17,19 @@
   .sub { font-size:13px; color:#8a8a8a; margin:6px 0 14px; line-height:1.6; }
   #tun { font-size:12px; color:#07c160; word-break:break-all; margin-bottom:10px; min-height:16px; }
   #tun.err { color:#d0392b; }
+  .security { margin:10px 0 6px; padding:12px; border:1px solid #ececec; border-radius:10px; background:#fafafa; text-align:left; }
+  .security-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:9px; font-size:13px; font-weight:600; }
+  #securityStatus { color:#d0392b; font-size:12px; font-weight:500; }
+  #securityStatus.on { color:#07a653; }
+  .security-inputs { display:flex; gap:6px; }
+  .security-inputs input { min-width:0; flex:1; height:34px; border:1px solid #ddd; border-radius:7px; padding:0 8px; font-size:12px; outline:none; }
+  .security-inputs input:focus { border-color:#07c160; }
+  .security-actions { display:flex; gap:6px; margin-top:8px; }
+  .security-actions button { height:32px; padding:0 11px; border:0; border-radius:7px; cursor:pointer; font-size:12px; }
+  .security-actions .save { background:#07c160; color:#fff; }
+  .security-actions .disable { background:#eee; color:#666; }
+  #securityMsg { min-height:15px; margin-top:6px; color:#888; font-size:11px; }
+  #securityMsg.err { color:#d0392b; }
   .qr { min-height:190px; display:flex; align-items:center; justify-content:center; }
   .qr svg { image-rendering: pixelated; }
   .linkrow { display:flex; gap:6px; margin-top:8px; }
@@ -42,9 +55,21 @@
       </svg>
     </div>
     <h1>鲸聊 · 配对</h1>
-    <p class="sub">用手机「鲸聊」App 扫一扫连接<br>经免费公网隧道（Cloudflare，无需账号）</p>
+    <p class="sub">用手机「鲸聊」App 扫一扫连接<br>经免费公网隧道（Cloudflare，无需账号）__TUNNEL_PASSWORD_SUB__</p>
 
     <div id="tun">正在连接公网隧道…</div>
+    <section class="security">
+      <div class="security-head"><span>公网登录密码</span><span id="securityStatus">读取中…</span></div>
+      <div class="security-inputs">
+        <input id="securityPassword" type="password" maxlength="256" autocomplete="new-password" placeholder="新密码（至少 8 位）">
+        <input id="securityConfirm" type="password" maxlength="256" autocomplete="new-password" placeholder="再次输入">
+      </div>
+      <div class="security-actions">
+        <button class="save" onclick="savePassword()">设置 / 更换密码</button>
+        <button class="disable" onclick="disablePassword()">关闭密码</button>
+      </div>
+      <div id="securityMsg">密码只保存在本机；更换后所有公网登录立即失效。</div>
+    </section>
     <div class="qr" id="qr"></div>
     <div class="linkrow"><input id="link" readonly value=""><button onclick="copyLink()">复制链接</button></div>
 
@@ -54,7 +79,7 @@
     </div>
 
     <div id="msg"></div>
-    <div class="hint">二维码 10 分钟内有效，一次扫码即完成配对；<br>本页面仅限电脑本机打开（127.0.0.1）。<br>公网地址每次重启会变，手机重新扫码即可。</div>
+    <div class="hint">二维码 10 分钟内有效；__TUNNEL_PASSWORD_HINT__<br>本页面仅限电脑本机打开（127.0.0.1）。<br>公网地址每次重启会变，手机重新扫码即可。</div>
   </div>
 
 <script>
@@ -64,6 +89,10 @@ __QRCODE_LIB__
   var msg = document.getElementById('msg');
   var link = document.getElementById('link');
   var tunEl = document.getElementById('tun');
+  var securityStatus = document.getElementById('securityStatus');
+  var securityMsg = document.getElementById('securityMsg');
+  var passwordInput = document.getElementById('securityPassword');
+  var confirmInput = document.getElementById('securityConfirm');
   var tunnelRunning = false;
   var hasQr = false;
 
@@ -71,6 +100,56 @@ __QRCODE_LIB__
     msg.textContent = text;
     msg.className = isErr ? 'err' : '';
   }
+
+  function setSecurityMsg(text, isErr) {
+    securityMsg.textContent = text;
+    securityMsg.className = isErr ? 'err' : '';
+  }
+
+  function loadSecurityStatus() {
+    fetch('/api/whale/pair/security')
+      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        var enabled = r && r.passwordEnabled === true;
+        securityStatus.textContent = enabled ? '已开启' : '未开启';
+        securityStatus.className = enabled ? 'on' : '';
+      })
+      .catch(function () { securityStatus.textContent = '读取失败'; securityStatus.className = ''; });
+  }
+
+  function updatePassword(password) {
+    return fetch('/api/whale/pair/security', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: password })
+    }).then(function (r) { return r.json().then(function (body) { return { status: r.status, body: body }; }); });
+  }
+
+  window.savePassword = function () {
+    var password = passwordInput.value;
+    if (password.length < 8) { setSecurityMsg('密码至少需要 8 位', true); return; }
+    if (password !== confirmInput.value) { setSecurityMsg('两次输入的密码不一致', true); return; }
+    updatePassword(password).then(function (result) {
+      if (result.status !== 200 || !result.body || result.body.ok !== true) {
+        setSecurityMsg((result.body && result.body.error) || '保存失败', true); return;
+      }
+      passwordInput.value = ''; confirmInput.value = '';
+      securityStatus.textContent = '已开启'; securityStatus.className = 'on';
+      setSecurityMsg('密码已更新，原有公网登录已立即失效');
+    }).catch(function () { setSecurityMsg('保存失败', true); });
+  };
+
+  window.disablePassword = function () {
+    if (!window.confirm('确定关闭公网密码登录？路径白名单和扫码配对保护仍会保留。')) return;
+    updatePassword('').then(function (result) {
+      if (result.status !== 200 || !result.body || result.body.ok !== true) {
+        setSecurityMsg((result.body && result.body.error) || '操作失败', true); return;
+      }
+      passwordInput.value = ''; confirmInput.value = '';
+      securityStatus.textContent = '未开启'; securityStatus.className = '';
+      setSecurityMsg('已关闭密码登录；建议尽快重新设置');
+    }).catch(function () { setSecurityMsg('操作失败', true); });
+  };
+
+  loadSecurityStatus();
 
   function renderQR(text) {
     try {

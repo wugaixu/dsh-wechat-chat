@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.1** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.2** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -104,6 +104,7 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
 ```
 
 - 电脑浏览器打开 `http://127.0.0.1:3080/whale-panel` 能看到配对二维码面板；
+- 在面板的「公网登录密码」区域输入两次新密码并保存，可随时设置或更换，立即生效；
 - 打开 `http://127.0.0.1:3080/wechat` 能看到微信风聊天页。
 
 ### 构建 / 安装 APK
@@ -131,7 +132,8 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
 | `model` | `deepseek-v4-flash` | 模型 |
 | `reasoningEffort` | `low` | 推理强度 |
 | `autoTunnel` | `true` | 自动开免费 Cloudflare quick tunnel |
-| `publicBaseUrl` | 无 | 自备公网地址（优先于隧道） |
+| `tunnelPassword` | 空 | 仅用于旧配置首次迁移；迁移后必须从 YAML 删除，推荐直接在本机面板设置 |
+| `publicBaseUrl` | 无 | 自备公网地址（不经过内置密码网关） |
 | `tokenTtlMs` | `600000` | 配对令牌有效期（毫秒） |
 | `idleExpireMs` | `2592000000` | 设备闲置失效（30 天） |
 | `maxDevices` | `4` | 最大配对设备数 |
@@ -139,6 +141,12 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   （或托盘重启）
 **头像 / 背景**：手机 App 内点头像即可修改（或把图片放到 `$DSH_HOME/wechat-chat/avatars/`：
 `other.*` 对方头像、`me.*` 自己头像、`background.*` 聊天背景）。
 **界面样式**：改 `plugin/lib/chat-page.html` 内的 CSS（改动后刷新页面即可，无需重启）。
+
+## 注意事项
+
+- 使用 `file:` / `link:` 本地安装时，请先在插件源码目录执行 `npm install`，否则真实路径下可能缺少 `cloudflared` 依赖；GitHub/npm 安装不受影响。
+- 本插件与 `@linxin666/dsh-remote-web-ui` 功能重叠时，应禁用对方的远程访问与桌面启动器条目，避免冲突。
+- 公网密码在仅限本机的 `/whale-panel` 管理，不依赖官方设置页的第三方 namespace allowlist；无需手改 `settings.yaml`。
 
 ## 已知限制
 
@@ -166,6 +174,10 @@ npm run verify    # 发布自检：node 语法检查 + 干净 tarball 安装 + �
 
 ## 安全
 
+免费 Quick Tunnel 始终先进入一个仅监听回环地址的安全网关，而不会直连整个 DSH Web。网关只放行 `/wechat`、`/api/wechat/*` 和必要的配对状态端点。密码只能通过本机配对面板设置；服务器只在 `$DSH_HOME/wechat-chat-settings.json` 保存带随机盐的 scrypt 哈希，不保存或回传明文。首次扫码需输入密码，成功后写入 30 天有效的 `HttpOnly + Secure + SameSite=Lax` 登录 Cookie；更换密码会立即令所有旧登录失效，连续 8 次失败会锁定来源 1 分钟。
+
 配对设备即完全控制凭据（与现有远程插件同一安全模型）。停止/取消配对会立即
 切断 `/remote` 通道，本插件的聊天页与接口随之不可用。四个控制面
 （配对、自更新、插件管理、桌面启动器）对远程设备始终不可达。
+
+[English](README.en.md) | [中文](README.md)

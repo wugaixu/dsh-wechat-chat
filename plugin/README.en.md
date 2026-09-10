@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.1** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.2** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -106,6 +106,7 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   (or restart from the tr
 ```
 
 - `http://127.0.0.1:3080/whale-panel` shows the pairing QR panel;
+- use its “Public login password” area to set or replace the password immediately;
 - `http://127.0.0.1:3080/wechat` shows the WeChat-style chat page.
 
 ### Build / install the APK
@@ -133,7 +134,8 @@ Plugin `config` in `cordis.patch.yml` (all optional):
 | `model` | `deepseek-v4-flash` | model |
 | `reasoningEffort` | `low` | reasoning effort |
 | `autoTunnel` | `true` | auto-start a free Cloudflare quick tunnel |
-| `publicBaseUrl` | none | your own public base (takes priority over tunnel) |
+| `tunnelPassword` | empty | legacy bootstrap migration only; remove it from YAML after migration and prefer the local panel |
+| `publicBaseUrl` | none | your own public base (does not pass through the built-in password gateway) |
 | `tokenTtlMs` | `600000` | pairing token validity (ms) |
 | `idleExpireMs` | `2592000000` | device idle expiry (30 days) |
 | `maxDevices` | `4` | max paired devices |
@@ -142,6 +144,12 @@ Plugin `config` in `cordis.patch.yml` (all optional):
 into `$DSH_HOME/wechat-chat/avatars/`: `other.*` assistant avatar, `me.*` your
 avatar, `background.*` chat background).
 **Styling**: edit the CSS in `plugin/lib/chat-page.html` (refresh the page, no restart).
+
+## Notes
+
+- For a local `file:` / `link:` install, run `npm install` in the plugin source directory first or the real path may lack the `cloudflared` dependency. GitHub/npm installs are unaffected.
+- If `@linxin666/dsh-remote-web-ui` is installed, disable its overlapping remote-access and desktop-launcher rows to avoid conflicts.
+- The public password is managed at the loopback-only `/whale-panel`; it does not depend on the official settings namespace allowlist, so no `settings.yaml` fallback is needed.
 
 ## Develop & release
 
@@ -174,7 +182,11 @@ outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
 
 ## Security
 
+The free Quick Tunnel always targets a loopback-only security gateway instead of the full DSH Web server. The gateway exposes only `/wechat`, `/api/wechat/*`, and the pairing-status endpoints required by the app. The password can be managed only from the local pairing panel; the server stores only a randomly salted scrypt hash in `$DSH_HOME/wechat-chat-settings.json`, never the plaintext. The first scan asks for the password and then stores a 30-day `HttpOnly + Secure + SameSite=Lax` login cookie. Changing the password invalidates every existing public login immediately, and eight consecutive failures lock that source for one minute.
+
 A paired device is a full-control credential (same model as the existing remote
 plugin). Stop/revoke pairing immediately cuts the channel; the chat page and API
 become unavailable. The four control surfaces (pairing, self-update, plugin
 management, desktop launcher) are never reachable from a remote device.
+
+[English](README.en.md) | [中文](README.md)

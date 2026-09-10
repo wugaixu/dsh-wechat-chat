@@ -22,7 +22,8 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, copyFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createServer, request as httpRequest } from 'node:http'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -35,6 +36,7 @@ const DEFAULT_TITLE = '鲸聊 · 手机'
 // 定义见 $DSH_HOME/.agent-presets/wechat-chat/agent.cordis.yml
 const AGENT_PRESET = 'wechat-chat'
 const COOKIE_NAME = 'whale_pair'
+const TUNNEL_AUTH_COOKIE = 'whale_tunnel_auth'
 const DEVICE_HEADER = 'x-whale-device'
 const DEFAULT_TOKEN_TTL_MS = 10 * 60 * 1000
 const DEFAULT_IDLE_EXPIRE_MS = 30 * 24 * 60 * 60 * 1000
@@ -178,7 +180,7 @@ const USER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><r
 
 /* ── pairing state machine (ported from remote-web-ui pairing.ts) ─────── */
 
-class PairingService {
+export class PairingService {
   constructor(config) {
     this.config = config
     this.tokens = new Map()
@@ -267,6 +269,8 @@ class PairingService {
     if (record === undefined || this.stopped || Date.now() > record.expiresAt) {
       return { ok: false, code: 'invalid' }
     }
+    // 成功配对前先原子消费令牌，防止同一二维码在有效期内被重放。
+    this.tokens.delete(token)
     const deviceId = randomBytes(16).toString('hex')
     const now = Date.now()
     if (this.devices.size >= this.config.maxDevices) {
@@ -342,6 +346,250 @@ function sanitizeUserAgent(raw) {
   const cleaned = raw.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim()
   if (cleaned === '') return undefined
   return cleaned.length <= 180 ? cleaned : cleaned.slice(0, 180)
+}
+
+/* ── password-protected public gateway ────────────────────────────────── */
+
+function constantTimeTextEqual(left, right) {
+  const a = createHash('sha256').update(String(left), 'utf8').digest()
+  const b = createHash('sha256').update(String(right), 'utf8').digest()
+  return timingSafeEqual(a, b)
+}
+
+export function hashTunnelPassword(password) {
+  const salt = randomBytes(16)
+  const derived = scryptSync(password, salt, 32)
+  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}`
+}
+
+function verifyTunnelPassword(password, encoded) {
+  const parts = typeof encoded === 'string' ? encoded.split('$') : []
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false
+  try {
+    const salt = Buffer.from(parts[1], 'base64url')
+    const expected = Buffer.from(parts[2], 'base64url')
+    const actual = scryptSync(password, salt, expected.length)
+    return expected.length === actual.length && timingSafeEqual(expected, actual)
+  } catch { return false }
+}
+
+function safeNextPath(value) {
+  if (typeof value !== 'string' || value.length > 2048 || !value.startsWith('/') || value.startsWith('//')) return '/wechat'
+  return value
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch])
+}
+
+function readFormBody(req, maxBytes = 8192) {
+  return new Promise((resolve) => {
+    const chunks = []
+    let size = 0
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > maxBytes) { finish(null); req.destroy(); return }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      try { finish(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))) } catch { finish(null) }
+    })
+    req.on('error', () => finish(null))
+  })
+}
+
+function loginPage(next, error = '') {
+  const message = error === '' ? '' : `<div class="error">${escapeHtml(error)}</div>`
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>鲸聊安全登录</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#ededed;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#191919}.card{width:min(90vw,380px);padding:32px 24px;background:#fff;border-radius:14px;box-shadow:0 8px 32px #0002}.logo{width:58px;height:58px;margin:0 auto 14px;display:grid;place-items:center;border-radius:16px;background:#07c160;color:#fff;font-size:31px}h1{margin:0;text-align:center;font-size:22px}.sub{margin:8px 0 24px;text-align:center;color:#777;font-size:14px}.error{margin:0 0 12px;padding:9px 11px;border-radius:7px;background:#fff0f0;color:#c62828;font-size:14px}input{width:100%;height:46px;padding:0 13px;border:1px solid #ccc;border-radius:8px;font-size:16px;outline:none}input:focus{border-color:#07c160}button{width:100%;height:46px;margin-top:14px;border:0;border-radius:8px;background:#07c160;color:#fff;font-size:16px;font-weight:600}</style></head><body><main class="card"><div class="logo">鲸</div><h1>鲸聊安全登录</h1><p class="sub">请输入电脑端设置的公网访问密码</p>${message}<form method="post" action="/__whale/login"><input type="hidden" name="next" value="${escapeHtml(next)}"><input name="password" type="password" autocomplete="current-password" maxlength="256" autofocus required placeholder="访问密码"><button type="submit">登录</button></form></main></body></html>`
+}
+
+export class TunnelAuthGateway {
+  constructor(upstreamPort, passwordHash) {
+    this.upstreamPort = upstreamPort
+    this.passwordHash = passwordHash
+    this.secret = randomBytes(32)
+    this.authValue = createHmac('sha256', this.secret).update('whale-tunnel-auth-v1').digest('base64url')
+    this.server = undefined
+    this.failures = new Map()
+  }
+
+  isAuthorized(req) {
+    if (this.passwordHash === '') return true
+    const value = readCookie(req.headers.cookie, TUNNEL_AUTH_COOKIE)
+    return typeof value === 'string' && constantTimeTextEqual(value, this.authValue)
+  }
+
+  setPasswordHash(passwordHash) {
+    this.passwordHash = passwordHash
+    this.secret = randomBytes(32)
+    this.authValue = createHmac('sha256', this.secret).update('whale-tunnel-auth-v1').digest('base64url')
+    this.failures.clear()
+  }
+
+  clientKey(req) {
+    const cf = req.headers['cf-connecting-ip']
+    return typeof cf === 'string' && cf !== '' ? cf.slice(0, 80) : (req.socket.remoteAddress || 'unknown')
+  }
+
+  allowAttempt(req) {
+    const key = this.clientKey(req)
+    const now = Date.now()
+    const record = this.failures.get(key)
+    if (!record) return true
+    if (now < record.lockedUntil) return false
+    if (now - record.since > 60_000) {
+      this.failures.delete(key)
+      return true
+    }
+    return record.count < 8
+  }
+
+  recordFailure(req) {
+    const key = this.clientKey(req)
+    const now = Date.now()
+    const old = this.failures.get(key)
+    const record = !old || now - old.since > 60_000 ? { since: now, count: 0, lockedUntil: 0 } : old
+    record.count += 1
+    if (record.count >= 8) record.lockedUntil = now + 60_000
+    this.failures.set(key, record)
+    if (this.failures.size > 1024) {
+      const oldest = [...this.failures.entries()].sort((a, b) => a[1].since - b[1].since).slice(0, 256)
+      for (const [oldKey] of oldest) this.failures.delete(oldKey)
+    }
+  }
+
+  clearFailures(req) {
+    this.failures.delete(this.clientKey(req))
+  }
+
+  isAllowedPath(pathname) {
+    return pathname === '/wechat'
+      || pathname.startsWith('/api/wechat/')
+      || pathname === '/api/whale/pair/accept'
+      || pathname === '/api/whale/pair/heartbeat'
+      || pathname === '/api/whale/pair/status'
+  }
+
+  async handle(req, res) {
+    const requestUrl = new URL(req.url || '/', 'http://gateway.invalid')
+    if (requestUrl.pathname === '/__whale/login') {
+      await this.handleLogin(req, res, requestUrl)
+      return
+    }
+    if (!this.isAllowedPath(requestUrl.pathname)) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('not found')
+      return
+    }
+    if (!this.isAuthorized(req)) {
+      if ((req.method || 'GET') === 'GET' && requestUrl.pathname === '/wechat') {
+        const next = safeNextPath(req.url || '/wechat')
+        res.writeHead(303, { location: `/__whale/login?next=${encodeURIComponent(next)}`, 'cache-control': 'no-store' })
+        res.end()
+      } else {
+        writeJson(res, 401, { ok: false, code: 'tunnel-password-required' })
+      }
+      return
+    }
+    this.proxy(req, res)
+  }
+
+  async handleLogin(req, res, requestUrl) {
+    if (this.passwordHash === '') {
+      res.writeHead(303, { location: safeNextPath(requestUrl.searchParams.get('next') || '/wechat'), 'cache-control': 'no-store' })
+      res.end()
+      return
+    }
+    if ((req.method || 'GET') === 'GET') {
+      const next = safeNextPath(requestUrl.searchParams.get('next') || '/wechat')
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY' })
+      res.end(loginPage(next))
+      return
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'GET, POST', 'content-type': 'text/plain; charset=utf-8' })
+      res.end('method not allowed')
+      return
+    }
+    const form = await readFormBody(req)
+    const next = safeNextPath(form && form.get('next'))
+    if (!this.allowAttempt(req)) {
+      res.writeHead(429, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '60' })
+      res.end(loginPage(next, '尝试次数过多，请一分钟后再试'))
+      return
+    }
+    const supplied = form && form.get('password')
+    if (typeof supplied !== 'string' || !verifyTunnelPassword(supplied, this.passwordHash)) {
+      this.recordFailure(req)
+      res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(loginPage(next, '密码错误'))
+      return
+    }
+    this.clearFailures(req)
+    res.writeHead(303, {
+      location: next,
+      'cache-control': 'no-store',
+      'set-cookie': `${TUNNEL_AUTH_COOKIE}=${this.authValue}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`,
+    })
+    res.end()
+  }
+
+  proxy(req, res) {
+    const headers = { ...req.headers }
+    delete headers.connection
+    delete headers['proxy-connection']
+    const upstream = httpRequest({
+      hostname: '127.0.0.1',
+      port: this.upstreamPort,
+      method: req.method,
+      path: req.url,
+      headers,
+    }, (upstreamRes) => {
+      const responseHeaders = { ...upstreamRes.headers }
+      delete responseHeaders.connection
+      res.writeHead(upstreamRes.statusCode || 502, responseHeaders)
+      upstreamRes.pipe(res)
+    })
+    upstream.on('error', () => {
+      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('upstream unavailable')
+    })
+    req.pipe(upstream)
+  }
+
+  start() {
+    if (this.server !== undefined) return Promise.reject(new Error('gateway already started'))
+    return new Promise((resolve, reject) => {
+      const server = createServer((req, res) => {
+        void this.handle(req, res).catch(() => {
+          if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('gateway error')
+        })
+      })
+      this.server = server
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        server.removeListener('error', reject)
+        const address = server.address()
+        if (!address || typeof address === 'string') { reject(new Error('无法取得安全网关端口')); return }
+        resolve(`http://127.0.0.1:${address.port}`)
+      })
+    })
+  }
+
+  stop() {
+    if (this.server !== undefined) {
+      try { this.server.close() } catch { /* best effort */ }
+      this.server = undefined
+    }
+    this.failures.clear()
+  }
 }
 
 /* ── auto-tunnel (ported from remote-web-ui tunnel.ts; free Cloudflare quick tunnel) ── */
@@ -531,21 +779,44 @@ function hiddenIdsOf(key) {
 
 const NICKNAME_FILE = join(home, 'wechat-chat-settings.json')
 
-function loadNickname() {
+function loadChatSettings() {
   try {
-    const s = JSON.parse(readFileSync(NICKNAME_FILE, 'utf8'))
-    if (s && typeof s.nickname === 'string' && s.nickname.trim() !== '') return s.nickname.trim().slice(0, 30)
-  } catch { /* 无/损坏则用默认 */ }
-  return undefined
+    const value = JSON.parse(readFileSync(NICKNAME_FILE, 'utf8'))
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch { return {} }
+}
+
+function persistChatSettings(patch) {
+  try {
+    mkdirSync(dirname(NICKNAME_FILE), { recursive: true })
+    const value = { ...loadChatSettings(), ...patch }
+    writeFileSync(NICKNAME_FILE, JSON.stringify(value), { mode: 0o600 })
+    return true
+  } catch (err) {
+    console.error('wechat-chat: failed to persist settings', err)
+    return false
+  }
+}
+
+function loadNickname() {
+  const value = loadChatSettings().nickname
+  return typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, 30) : undefined
 }
 
 function persistNickname(name) {
-  try {
-    mkdirSync(dirname(NICKNAME_FILE), { recursive: true })
-    writeFileSync(NICKNAME_FILE, JSON.stringify({ nickname: name }))
-  } catch (err) {
-    console.error('wechat-chat: failed to persist nickname', err)
-  }
+  persistChatSettings({ nickname: name })
+}
+
+function loadTunnelPasswordState() {
+  const settings = loadChatSettings()
+  const present = Object.prototype.hasOwnProperty.call(settings, 'tunnelPasswordHash')
+  const value = settings.tunnelPasswordHash
+  const passwordHash = typeof value === 'string' && (value === '' || value.startsWith('scrypt$')) ? value : ''
+  return { present, passwordHash }
+}
+
+function persistTunnelPasswordHash(passwordHash) {
+  return persistChatSettings({ tunnelPasswordHash: passwordHash, tunnelPassword: undefined })
 }
 
 /* ── DeepSeek 余额 ──────────────────────────────────────────────────────── */
@@ -600,11 +871,24 @@ export function apply(ctx, config = {}) {
     ? config.publicBaseUrl
     : undefined
   const autoTunnel = config.autoTunnel === true
+  const configuredTunnelPassword = typeof config.tunnelPassword === 'string' ? config.tunnelPassword : ''
+  const storedPassword = loadTunnelPasswordState()
+  let tunnelPasswordHash = storedPassword.passwordHash
+  // 兼容旧配置：仅在从未写入交互式设置时迁移一次。显式关闭（空哈希）不会在重启后被旧配置重新开启。
+  if (!storedPassword.present && configuredTunnelPassword !== '') {
+    tunnelPasswordHash = hashTunnelPassword(configuredTunnelPassword)
+    persistTunnelPasswordHash(tunnelPasswordHash)
+    console.warn('wechat-chat: 已把旧 tunnelPassword 迁移为 scrypt 哈希；请从 cordis.patch.yml 删除明文字段')
+  }
+  const webPort = Number.isFinite(ctx.webServer.port) ? ctx.webServer.port : 3080
 
-  // Free Cloudflare quick tunnel: when it reports a URL, it becomes the QR
-  // base (and a trusted fence host), so phones pair from anywhere for free.
+  // Free Cloudflare quick tunnel. When a password is configured, cloudflared
+  // targets a loopback-only gateway that authenticates first and exposes only
+  // the Whale Chat routes — never the rest of the DSH Web application.
   let tunnelBase = undefined
-  const tunnel = new TunnelManager(`http://127.0.0.1:${Number.isFinite(ctx.webServer.port) ? ctx.webServer.port : 3080}`)
+  const tunnel = new TunnelManager(`http://127.0.0.1:${webPort}`)
+  // 即使暂未设置密码，也始终通过路径白名单网关，避免暴露整个 DSH Web。
+  const authGateway = new TunnelAuthGateway(webPort, tunnelPasswordHash)
   tunnel.onPhase((info) => {
     tunnelBase = info.phase === 'running' && typeof info.url === 'string' && info.url !== '' ? info.url : undefined
   })
@@ -797,8 +1081,7 @@ export function apply(ctx, config = {}) {
       .replace('__WECHAT_DEVICE_VALUE__', () => JSON.stringify(deviceId))
       .replace('__WECHAT_PAIR_ERR_VALUE__', () => JSON.stringify(pairErr))
       .replace('__WECHAT_CLIENT_VALUE__', () => JSON.stringify(client))
-    // 导航式配对：/wechat?pair=<token> 校验并直接下发聊天页（带设备凭据），
-    // 不依赖二次跳转——最稳的 WebView 路径。
+    // 导航式配对：/wechat?pair=<token> 校验后下发设备 Cookie，再重定向到不含令牌的干净地址。
     if (typeof pairToken === 'string' && pairToken !== '') {
       const ra = (req.socket && req.socket.remoteAddress) || '?'
       console.log(`wechat-chat: pair accept from ${ra} host=${req.headers.host || '?'} ua=${(req.headers['user-agent'] || '').slice(0, 60)}`)
@@ -818,12 +1101,14 @@ export function apply(ctx, config = {}) {
         return
       }
       console.log(`wechat-chat: pair accept OK device=${result.deviceId.slice(0, 8)}…`)
-      res.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
+      const cleanLocation = client !== '' ? `/wechat?client=${encodeURIComponent(client)}` : '/wechat'
+      res.writeHead(303, {
+        location: cleanLocation,
         'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
         ...cookieHeader(result.deviceId),
       })
-      res.end(render(result.deviceId, ''))
+      res.end()
       return
     }
     const device = url.searchParams.get('device') || deviceIdOf(req) || ''
@@ -839,7 +1124,11 @@ export function apply(ctx, config = {}) {
       res.end('forbidden: panel is local-only')
       return
     }
-    const html = PANEL.replace('__QRCODE_LIB__', () => QRCODE_LIB)
+    const passwordEnabled = tunnelPasswordHash !== ''
+    const html = PANEL
+      .replace('__QRCODE_LIB__', () => QRCODE_LIB)
+      .replace('__TUNNEL_PASSWORD_SUB__', passwordEnabled ? '，并启用密码保护' : '')
+      .replace('__TUNNEL_PASSWORD_HINT__', passwordEnabled ? '首次扫码先输入公网登录密码，再完成配对。' : '一次扫码即完成配对。')
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
     res.end(html)
   }
@@ -847,6 +1136,30 @@ export function apply(ctx, config = {}) {
   const handleWhaleApi = async (req, res) => {
     const url = new URL(req.url || '/', 'http://wechat.invalid')
     const pathname = url.pathname
+
+    if (pathname === '/api/whale/pair/security') {
+      if (!loopbackFence(req)) { writeJson(res, 403, { ok: false, code: 'forbidden' }); return }
+      if (req.method === 'GET') {
+        writeJson(res, 200, { ok: true, passwordEnabled: tunnelPasswordHash !== '', minimumLength: 8 })
+        return
+      }
+      if (req.method !== 'POST') { writeJson(res, 405, { ok: false, code: 'method-not-allowed' }); return }
+      const body = await readJsonBody(req, MAX_BODY)
+      const password = body && typeof body.password === 'string' ? body.password : null
+      if (password === null || password.length > 256 || (password !== '' && password.length < 8)) {
+        writeJson(res, 400, { ok: false, code: 'bad-password', error: '密码至少 8 位；留空仅用于明确关闭密码保护' })
+        return
+      }
+      const passwordHash = password === '' ? '' : hashTunnelPassword(password)
+      if (!persistTunnelPasswordHash(passwordHash)) {
+        writeJson(res, 500, { ok: false, code: 'persist-failed', error: '无法保存密码设置' })
+        return
+      }
+      tunnelPasswordHash = passwordHash
+      authGateway.setPasswordHash(passwordHash)
+      writeJson(res, 200, { ok: true, passwordEnabled: password !== '', sessionsInvalidated: true })
+      return
+    }
 
     if (pathname === '/api/whale/pair/issue') {
       if (!loopbackFence(req) || req.method !== 'POST') { writeJson(res, req.method === 'POST' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
@@ -1171,14 +1484,23 @@ export function apply(ctx, config = {}) {
     ]
     const timer = setInterval(() => { service.sweep() }, 10_000)
     timer.unref()
+    let active = true
     if (autoTunnel) {
-      tunnel.start()
-      console.log('wechat-chat: 正在启动免费公网隧道（Cloudflare quick tunnel）…')
+      void authGateway.start().then((gatewayTarget) => {
+        if (!active) { authGateway.stop(); return }
+        tunnel.target = gatewayTarget
+        tunnel.start()
+        console.log(`wechat-chat: 正在启动${tunnelPasswordHash !== '' ? '带密码保护的' : '受限路径的'}免费公网隧道（Cloudflare quick tunnel）…`)
+      }).catch((err) => {
+        console.error(`wechat-chat: 无法启动公网安全网关：${(err && err.message) || String(err)}`)
+      })
     }
     return () => {
+      active = false
       for (const dispose of disposers) dispose()
       clearInterval(timer)
       tunnel.dispose()
+      authGateway.stop()
     }
   }, 'wechat-chat: routes')
 

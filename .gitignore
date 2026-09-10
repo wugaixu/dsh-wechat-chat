@@ -3,6 +3,7 @@ node_modules/
 *.tgz
 package-lock.json
 *.log
+cloudflared.exe
 .smoke-out/
 .e2e-out/
 
