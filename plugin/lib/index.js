@@ -222,6 +222,22 @@ function extractText(msg) {
   return parts.join('\n').trim()
 }
 
+/**
+ * 该 user/message 事件是不是「手机上的人」说的话。
+ *
+ * 0.2 起，宿主把机器注入的上下文也作为 user/message 事件发出，并带上来源标记
+ * （`source.kind`：`runtime-context` 运行环境快照、agent-instructions 的
+ * <system-reminder> 技能清单、`model-selection`、`tool-registry`、`schedule` 等）。
+ * 这些不是用户输入，若原样转发，手机聊天页会把大段英文上下文当成用户气泡显示。
+ * 只转发真正来自人的消息（`kind === 'user'`，即 user-rpc 提交的输入）；
+ * 事件没有来源字段的旧运行时保持原行为。
+ */
+export function isHumanUserMessage(data) {
+  const source = data && typeof data === 'object' ? data.source : undefined
+  if (!source || typeof source !== 'object' || typeof source.kind !== 'string') return true
+  return source.kind === 'user'
+}
+
 const ASSISTANT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><rect width="96" height="96" rx="20" fill="#07c160"/><path d="M28 44c0-11 9-20 20-20s20 9 20 20v2c8 1 14 8 14 16 0 9-7 16-16 16-3 0-5.5-.8-7.8-2.2-3.3 1.4-6.8 2.2-10.2 2.2-13.3 0-24-10.7-24-24 0-5.9 2.2-11.2 5.7-15.3 3-4.3 4.3-6.4 4.3-9.5V42z" fill="#ffffff"/><circle cx="40" cy="42" r="3" fill="#07c160"/><circle cx="54" cy="42" r="3" fill="#07c160"/></svg>`
 const USER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><rect width="96" height="96" rx="20" fill="#e2e2e2"/><circle cx="48" cy="36" r="16" fill="#b8b8b8"/><path d="M18 84c4-18 16-26 30-26s26 8 30 26z" fill="#b8b8b8"/></svg>`
 
@@ -1271,6 +1287,7 @@ export function apply(ctx, config = {}) {
           const ev = rec && rec.event
           if (!ev) continue
           if (ev.type === 'user/message') {
+            if (!isHumanUserMessage(ev.data)) continue
             const text = extractText(ev.data)
             if (text) out.push({ id: 's' + ev.seq, role: 'user', text })
           } else if (ev.type === 'assistant/message') {
@@ -1310,6 +1327,7 @@ export function apply(ctx, config = {}) {
             broadcast(device, { type: 'status', text: '正在思考' })
             break
           case 'user/message': {
+            if (!isHumanUserMessage(ev.data)) break
             const text = extractText(ev.data)
             if (text) broadcast(device, { type: 'user', text, id: 's' + ev.seq })
             break

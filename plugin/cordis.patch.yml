@@ -1,3 +1,11 @@
+# dsh-wechat-chat bundle patch: mounts the plugin row (host half: pairing,
+# gated routes, free tunnel, local STT; client half: the sidebar entry).
+#
+# The phone-specific agent preset is NOT declared here. A 0.2 runtime resolves a
+# row name against the bundle that declares it, and a third-party bundle cannot
+# reach core packages such as `@deepseek-ai/dsh-agent-preset`; declaring the row
+# here makes the whole entry fail to import. The preset therefore ships as a
+# profile-patch fragment — see `preset/wechat-chat.preset.yml` and the README.
 - insert:
     - id: wechat-chat
       name: dsh-wechat-chat

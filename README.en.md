@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.4** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.5** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -50,13 +50,16 @@ paired device (cookie / header / query) → this plugin's gated /api/wechat/* ro
 dsh-wechat-chat/
 ├─ plugin/                       # DSH cordis host plugin (installable standalone)
 │  ├─ package.json / cordis.patch.yml
+│  ├─ preset/wechat-chat.preset.yml  # phone agent-preset declaration (paste into a profile patch)
+│  ├─ test/                      # node:test regression suite (pairing/tunnel/voice/entry/context filter)
+│  ├─ docs/local-voice.md        # offline voice input notes
 │  ├─ verify-release.mjs         # release self-check: npm pack + clean install + import host module
 │  └─ lib/
 │     ├─ index.js                # routes + session driver + pairing/gating/tunnel + voice upload
 │     ├─ stt.js                  # pinned whisper.cpp download, verification, install and local STT
 │     ├─ chat-page.html          # WeChat-style chat page (single file)
 │     ├─ panel-page.html         # PC pairing panel (QR)
-│     ├─ client.js               # client half (sidebar footer entry)
+│     ├─ client.js               # client half (sidebar footer entry; in-app panel on Desktop)
 │     └─ qrcode.js               # bundled qrcode-generator (MIT)
 ├─ app/                          # Android project (records WAV and uploads for local PC STT)
 │  └─ app/src/main/...           # MainActivity.java / layouts / firstrun.html / icons / manifest
@@ -109,6 +112,43 @@ C:\Users\Administrator\.dsh\launcher\start-dsh-web.cmd   (or restart from the tr
 - `http://127.0.0.1:3080/whale-panel` shows the pairing QR panel;
 - use its “Public login password” area to set or replace the password immediately;
 - `http://127.0.0.1:3080/wechat` shows the WeChat-style chat page.
+
+### Official Desktop app (Electron shell, DSH 0.2+)
+
+Desktop shares the same `$DSH_HOME` as Web, but each carrier owns its own profile,
+so install the plugin once more for the desktop profile:
+
+```bash
+# 1) install (the desktop profile is named `desktop`; use the dsh command from
+#    the app menu item "Manage dsh command…")
+dsh plugin --profile desktop add github:wugaixu/dsh-wechat-chat
+#    local development: dsh plugin --profile desktop add link:<repo>/plugin
+```
+
+2) **Declare the phone agent preset (required on 0.2, once).** Since 0.2, presets
+are declared by `@deepseek-ai/dsh-agent-preset` rows; the registry no longer scans
+`$DSH_HOME/.agent-presets/` (the 0.1.x user-preset directory). A third-party
+plugin bundle cannot resolve that core package name, so the declaration must come
+from the profile patch: append
+[`plugin/preset/wechat-chat.preset.yml`](preset/wechat-chat.preset.yml) to
+`$DSH_HOME/profiles/desktop/cordis.patch.yml` and restart Desktop. Without it,
+sending a message from the phone fails with `agent-preset/not-found` and no Whale
+session appears in the PC sidebar.
+
+3) Desktop differences (handled automatically, no configuration needed):
+
+| Item | Web (3080) | Desktop (19387) |
+| --- | --- | --- |
+| Port | `webserver.config.port` (default 3080) | shell default 19387; overridable by a `webserver.config.port` patch |
+| Sidebar entry | opens `/whale-panel` in a new tab | in-app same-origin iframe panel (the shell rejects `window.open` to a dsh-app URL, and a system browser has no Host credential — it would get 401) |
+| Local panel URL | `http://127.0.0.1:3080/whale-panel` | `http://127.0.0.1:19387/whale-panel` |
+| Phone connection | the public tunnel URL, independent of the port | same; running both carriers with `autoTunnel` opens two tunnels — keep only one running |
+
+> Running the Desktop and Web carriers at the same time makes both write
+> `$DSH_HOME/whale-devices.json` and `wechat-chat-devices.json`. During the
+> migration, stop the one you are not using (tray → Quit) so pairing state cannot
+> overwrite itself.
+
 
 ### Build / install the APK
 
@@ -165,6 +205,7 @@ Audio is never sent to iFlytek or another STT provider and no API key is needed.
 
 ```bash
 cd plugin
+npm test          # node:test suite: pairing / tunnel / voice / sidebar entry / context filter
 npm run verify    # release self-check: syntax check + clean tarball install + import host module
 ```
 
@@ -181,6 +222,11 @@ outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
 ## Known limitations
 
 - Chat payloads are text only: voice is transcribed locally before sending; code blocks / markdown render as plain text.
+- **Machine-injected context never reaches the phone**: since 0.2 the host emits the
+  runtime-context snapshot (`source.kind = runtime-context`) and `AGENTS.md` / skill
+  catalog `<system-reminder>` blocks as `user/message` events too. The plugin forwards
+  only messages that really came from a human (`source.kind === 'user'`); older runtimes
+  without a source field keep their previous behavior.
 - One at a time: sending while a turn is running is rejected (409); the top-right
   status shows progress. The cancel button is not yet exposed in the UI
   (the `/api/wechat/cancel` endpoint exists).
