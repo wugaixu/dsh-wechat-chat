@@ -27,6 +27,7 @@ import { createServer, request as httpRequest } from 'node:http'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { inspectPcmWav, LocalSttManager } from './stt.js'
+import { createDshSttEngine, dshSpeechService } from './host-stt.js'
 import { VoiceStore } from './voice.js'
 
 export const name = 'wechat-chat'
@@ -1182,10 +1183,23 @@ export function apply(ctx, config = {}) {
   const tunnel = new TunnelManager(`http://127.0.0.1:${webPort}`)
   // 即使暂未设置密码，也始终通过路径白名单网关，避免暴露整个 DSH Web。
   const authGateway = new TunnelAuthGateway(webPort, tunnelPasswordHash)
-  const stt = new LocalSttManager(join(home, 'wechat-chat', 'stt'), config.stt || {})
   // 语音条音频：保留 7 天后自动清理（含索引记录）。
   const voice = new VoiceStore(join(home, 'wechat-chat', 'voice'))
   const voiceLanguage = config.stt && ['auto', 'zh', 'en'].includes(config.stt.language) ? config.stt.language : 'zh'
+  // 语音识别引擎：优先用 DSH 内置的 speechToText 服务（桌面端自带 SenseVoice），
+  // 拿不到才回退到插件自带的 whisper.cpp。`stt.engine` 可强制 `dsh` / `whisper`。
+  const sttEnginePref = config.stt && ['auto', 'dsh', 'whisper'].includes(config.stt.engine) ? config.stt.engine : 'auto'
+  const hostSttEngine = createDshSttEngine(ctx, {
+    providerId: config.stt && typeof config.stt.provider === 'string' ? config.stt.provider : undefined,
+    timeoutMs: config.stt && Number.isFinite(config.stt.timeoutMs) ? config.stt.timeoutMs : undefined,
+  })
+  const useDshStt = sttEnginePref === 'dsh' || (sttEnginePref === 'auto' && hostSttEngine.available())
+  const stt = useDshStt ? hostSttEngine : new LocalSttManager(join(home, 'wechat-chat', 'stt'), config.stt || {})
+  if (useDshStt) {
+    console.log(`wechat-chat: 语音识别使用 DSH 内置引擎（${hostSttEngine.selectedId() ?? '未选定 provider'}）`)
+  } else if (sttEnginePref !== 'whisper') {
+    console.log('wechat-chat: 未发现 DSH 内置语音服务，语音识别回退到本机 whisper.cpp')
+  }
   tunnel.onPhase((info) => {
     tunnelBase = info.phase === 'running' && typeof info.url === 'string' && info.url !== '' ? info.url : undefined
   })

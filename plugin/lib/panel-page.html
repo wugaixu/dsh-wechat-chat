@@ -176,16 +176,29 @@ __QRCODE_LIB__
 
   function renderStt(info) {
     info = info || {};
-    var installing = info.phase === 'downloading-runtime' || info.phase === 'downloading-model';
-    sttStatus.textContent = info.ready ? '已就绪' : installing ? '安装中' : info.phase === 'failed' ? '安装失败' : '未安装';
+    var installing = info.phase === 'downloading-runtime' || info.phase === 'downloading-model' || info.phase === 'checking' || info.phase === 'verifying' || info.phase === 'loading';
+    var isDsh = info.engine === 'dsh';
+    sttStatus.textContent = info.ready ? '已就绪' : installing ? '安装中' : info.phase === 'failed' ? '准备失败' : '未安装';
     sttStatus.className = info.ready ? 'on' : '';
     sttProgress.style.width = Math.max(0, Math.min(100, Number(info.progress) || 0)) + '%';
     sttInstall.style.display = info.ready || installing ? 'none' : '';
     sttCancel.style.display = installing ? '' : 'none';
+    sttInstall.textContent = isDsh ? '准备识别模型' : '安装离线模型';
     if (info.error) { sttMsg.textContent = info.error; sttMsg.className = 'err'; }
-    else if (info.ready) { sttMsg.textContent = '离线模型已安装，手机语音会在本机转写。'; sttMsg.className = ''; }
-    else if (installing) { sttMsg.textContent = (info.phase === 'downloading-model' ? '正在下载中文多语言模型… ' : '正在下载识别程序… ') + (info.progress || 0) + '%'; sttMsg.className = ''; }
-    else { sttMsg.textContent = '完全免费且离线；首次安装约需下载 496 MB。'; sttMsg.className = ''; }
+    else if (info.ready) {
+      sttMsg.textContent = isDsh
+        ? '使用 DSH 内置的 ' + (info.modelName || 'SenseVoice') + '；手机语音在本机转写，和桌面端麦克风共用同一份模型。'
+        : '离线模型已安装，手机语音会在本机转写。';
+      sttMsg.className = '';
+    } else if (installing) {
+      sttMsg.textContent = '正在准备识别模型… ' + (info.progress || 0) + '%';
+      sttMsg.className = '';
+    } else {
+      sttMsg.textContent = isDsh
+        ? '使用 DSH 内置的 SenseVoice（首次准备约 230 MB，离线、免费）。'
+        : '完全免费且离线；首次安装约需下载 496 MB。';
+      sttMsg.className = '';
+    }
   }
 
   function pollStt() {

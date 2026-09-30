@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.5.1** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.6.0** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -180,6 +180,8 @@ Plugin `config` in `cordis.patch.yml` (all optional):
 | `tokenTtlMs` | `600000` | pairing token validity (ms) |
 | `idleExpireMs` | `2592000000` | device idle expiry (30 days) |
 | `maxDevices` | `4` | max paired devices |
+| `stt.engine` | `auto` | recognition engine: `auto` / `dsh` (DSH built-in SenseVoice) / `whisper` (bundled) |
+| `stt.provider` | none | override the DSH-side provider id (defaults to the registry default, usually `sensevoice-local`) |
 | `stt.language` | `zh` | local transcription language: `zh`, `en`, or `auto` |
 | `stt.threads` | `8` | whisper.cpp CPU threads (1–12) |
 | `stt.timeoutMs` | `120000` | per-recording timeout (30–300 seconds) |
@@ -191,9 +193,29 @@ avatar, `background.*` chat background).
 
 ## Free local voice input
 
-Click “Install offline model” in the loopback pairing panel (about 496 MB on first install). The phone records up to 60 seconds as PCM WAV and uploads it through the authenticated tunnel. A pinned whisper.cpp multilingual small model transcribes it on the PC. The text is placed into the input box for review or editing before it is sent to the real DSH session.
+The phone records up to 60 seconds as 16 kHz mono PCM16 WAV and uploads it through the authenticated tunnel; the PC
+transcribes it locally and sends the result into the real session as a `【语音】…` user message. Audio is never sent to
+iFlytek or another third party and no API key is needed.
 
-Audio is never sent to iFlytek or another STT provider and no API key is needed. Temporary WAV and output files are deleted after success or failure. Runtime and model downloads are pinned by URL, size, and SHA-256; install controls are loopback-only. See [`docs/local-voice.md`](docs/local-voice.md) (Chinese).
+**Two engines, picked automatically** (`stt.engine`):
+
+| `stt.engine` | What runs | Notes |
+| --- | --- | --- |
+| `auto` (default) | the DSH built-in service when present, otherwise whisper.cpp | Desktop / any profile with the official voice bundle takes the first branch |
+| `dsh` | DSH built-in recognition (`ctx.speechToText`, the SenseVoiceSmall INT8 provider from `@deepseek-ai/dsh-experimental-voice-input-bundle`) | runtime and model are managed by DSH under `$DSH_HOME/speech-to-text/sensevoice/`, **shared with the desktop composer's microphone button**; about 230 MB on first prepare |
+| `whisper` | the plugin's own pinned whisper.cpp multilingual small | fallback for 0.1.x or profiles without the voice bundle; about 496 MB under `$DSH_HOME/wechat-chat/stt/` |
+
+The pairing panel follows the active engine (“准备识别模型” + 230 MB / shared model for DSH, “安装离线模型” + 496 MB for
+whisper). Both are **local CPU inference** — only the model differs (SenseVoice is smaller and stronger for Chinese);
+cloud recognition would need a custom DSH speech provider.
+
+Uploaded WAVs are normalized to the canonical 44-byte header before they reach DSH (the 18-byte `fmt ` chunk that
+Android commonly emits is rejected by the official validator). Temporary files are deleted after success or failure;
+the whisper path pins URL, size and SHA-256, and its install controls are loopback-only. See
+[`docs/local-voice.md`](docs/local-voice.md) (Chinese).
+
+If you no longer want whisper, delete `$DSH_HOME/wechat-chat/stt/` (about 465 MB model + 8 MB runtime); under
+`auto`/`dsh` the plugin never touches it.
 
 ## Notes
 

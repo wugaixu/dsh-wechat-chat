@@ -23,7 +23,7 @@ try {
   const packed = JSON.parse(npm(['pack', '--json', '--pack-destination', temp], root))
   if (!Array.isArray(packed) || !packed[0]?.filename) throw new Error('npm pack 没有返回产物')
   const files = (packed[0].files || []).map(item => item.path.replaceAll('\\', '/'))
-  const required = ['package.json', 'lib/index.js', 'lib/stt.js', 'lib/client.js', 'lib/chat-page.html', 'lib/panel-page.html', 'cordis.patch.yml', 'preset/wechat-chat.preset.yml', 'docs/local-voice.md', 'README.md', 'README.en.md', 'LICENSE']
+  const required = ['package.json', 'lib/index.js', 'lib/stt.js', 'lib/host-stt.js', 'lib/voice.js', 'lib/client.js', 'lib/chat-page.html', 'lib/panel-page.html', 'cordis.patch.yml', 'preset/wechat-chat.preset.yml', 'docs/local-voice.md', 'README.md', 'README.en.md', 'LICENSE']
   const missing = required.filter(path => !files.includes(path))
   if (missing.length) throw new Error(`发布包缺少文件: ${missing.join(', ')}`)
   const leaked = files.filter(path => path.includes('node_modules/') || path.endsWith('.tgz') || path.includes('secrets.properties'))

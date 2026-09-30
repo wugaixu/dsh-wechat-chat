@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.5.1** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.6.0** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -170,6 +170,8 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
 | `tokenTtlMs` | `600000` | 配对令牌有效期（毫秒） |
 | `idleExpireMs` | `2592000000` | 设备闲置失效（30 天） |
 | `maxDevices` | `4` | 最大配对设备数 |
+| `stt.engine` | `auto` | 语音识别引擎：`auto` / `dsh`（DSH 内置 SenseVoice）/ `whisper`（插件自带） |
+| `stt.provider` | 无 | 覆盖 DSH 侧 provider id（默认取注册表的默认选择，通常是 `sensevoice-local`） |
 | `stt.language` | `zh` | 本地转写语言，可选 `zh` / `en` / `auto` |
 | `stt.threads` | `8` | whisper.cpp CPU 线程数（1–12） |
 | `stt.timeoutMs` | `120000` | 单次本地转写超时（30–300 秒） |
@@ -180,9 +182,27 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
 
 ## 免费本地语音输入
 
-在本机配对面板点击「安装离线模型」（首次约下载 496 MB）。手机按住录音后会把最多 60 秒的 PCM WAV 通过已认证隧道上传到电脑，由固定版本的 whisper.cpp multilingual small 模型离线转写。文字先进入输入框，确认或修改后才会发送到真实 DSH 会话。
+手机按住录音后会把最多 60 秒的 16 kHz/PCM16 单声道 WAV 通过已认证隧道上传到电脑，在本机转写，再把文字作为
+`【语音】…` 用户消息送进真实会话。录音不会发送给讯飞或其他第三方，不需要 API Key。
 
-录音不会发送给讯飞或其他第三方，不需要 API Key；临时 WAV 与输出在转写完成或失败后删除。运行库与模型均固定 URL、大小和 SHA-256，安装接口仅允许本机访问。详见 [`docs/local-voice.md`](docs/local-voice.md)。
+**两种引擎，默认自动选**（配置 `stt.engine`）：
+
+| `stt.engine` | 用什么 | 说明 |
+| --- | --- | --- |
+| `auto`（默认） | 有 DSH 内置服务就用它，否则回退 whisper.cpp | 桌面端 / 装了官方语音 bundle 的 profile 走第一条 |
+| `dsh` | DSH 内置语音识别（`ctx.speechToText`，即 `@deepseek-ai/dsh-experimental-voice-input-bundle` 里的 SenseVoiceSmall INT8） | 模型与运行时由 DSH 管理，存在 `$DSH_HOME/speech-to-text/sensevoice/`，**和桌面端输入框的麦克风按钮共用同一份**；首次准备约 230 MB |
+| `whisper` | 插件自带的 whisper.cpp multilingual small | 0.1.x 或没装语音 bundle 时的回退；首次安装约 496 MB，模型在 `$DSH_HOME/wechat-chat/stt/` |
+
+面板里的状态会跟着引擎变：走 DSH 时按钮是「准备识别模型」，提示文字写的是 230 MB 与共用的模型；
+走 whisper 时仍是「安装离线模型」和 496 MB。两种都是**本机 CPU 推理**，只是模型不同（SenseVoice 更小、
+中文更好）；需要云端识别得自己给 DSH 写一个 speech provider。
+
+上传的 WAV 会先规范化成标准 44 字节头再交给 DSH（安卓侧常见的 18 字节 `fmt ` 会被官方校验拒掉）。
+临时文件在转写完成或失败后删除；whisper 路径的运行库与模型使用固定 URL、大小和 SHA-256，安装接口仅限本机访问。
+详见 [`docs/local-voice.md`](docs/local-voice.md)。
+
+不想再用 whisper 的话，可以把 `$DSH_HOME/wechat-chat/stt/`（约 465 MB 模型 + 8 MB 运行库）删掉，
+插件在 `auto`/`dsh` 下不会再碰它。
 
 ## 注意事项
 
