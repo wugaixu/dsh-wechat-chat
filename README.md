@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.5** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.5.1** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -132,7 +132,7 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
 | 项目 | Web（3080） | 桌面端（19387） |
 | --- | --- | --- |
 | 端口 | `webserver.config.port`（默认 3080） | 壳默认 19387，可用 `webserver.config.port` patch 覆盖 |
-| 侧栏入口 | 新标签页打开 `/whale-panel` | 应用内同源 iframe 面板（壳会拒绝 dsh-app 的 `window.open`；系统浏览器没有 Host 凭据，会拿到 401） |
+| 侧栏入口 | 新标签页打开 `/whale-panel` | 应用内同源 iframe 面板（左上角「← 返回聊天」，Esc 也能退出；再点一次侧栏图标即关闭） |
 | 本机面板地址 | `http://127.0.0.1:3080/whale-panel` | `http://127.0.0.1:19387/whale-panel` |
 | 手机连接 | 公网隧道地址，与端口无关 | 同上；两个实例同时开 `autoTunnel` 会各开一条隧道，建议只保留一个在跑 |
 
@@ -193,6 +193,8 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
 ## 已知限制
 
 - 纯文本：手机端只发/收文本；代码块、markdown 以纯文本展示。
+- 长按文字气泡弹出「复制文字 / 多选删除」菜单（旧版是直接进多选）；语音条长按仍是「转文字 / 删除 / 取消」。
+- 语音条按它在会话历史里的真实位置渲染：重新连接或重开 App 时不会再全部堆到列表最下面。
 - 一次一条：上一轮回合未结束时发送会被拒绝（409），回合可用右上状态判断；
   取消按钮暂未在 UI 暴露（接口 `/api/wechat/cancel` 已实现）。
 - **机器注入的上下文不会发到手机**：0.2 起宿主把运行环境快照（`source.kind = runtime-context`）、

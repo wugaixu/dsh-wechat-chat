@@ -157,6 +157,22 @@
   }
   #voiceSheet button.cancel { background: #ededed; margin-bottom: 0; }
   #voiceSheet button.danger { color: #d0392b; }
+
+  /* ── 文字消息操作菜单（长按气泡：复制 / 多选） ─────── */
+  #textSheetMask {
+    position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; z-index: 60;
+  }
+  #textSheetMask.show { display: block; }
+  #textSheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 61; background: #f7f7f7;
+    border-radius: 12px 12px 0 0; padding: 8px; display: none;
+  }
+  #textSheet.show { display: block; }
+  #textSheet button {
+    display: block; width: 100%; height: 50px; margin: 0 0 6px; border: 0; border-radius: 9px;
+    background: #fff; font-size: 16px; color: #191919;
+  }
+  #textSheet button.cancel { background: #ededed; margin-bottom: 0; }
   .dots { display: inline-flex; gap: 4px; align-items: center; }
   .dots i {
     width: 6px; height: 6px; border-radius: 50%; background: #b8b8b8;
@@ -395,6 +411,13 @@
     <button id="voiceCancelBtn" class="cancel">取消</button>
   </div>
 
+  <div id="textSheetMask"></div>
+  <div id="textSheet">
+    <button id="textCopyBtn">复制文字</button>
+    <button id="textSelectBtn">多选删除</button>
+    <button id="textSheetCancel" class="cancel">取消</button>
+  </div>
+
   <div class="nick-mask" id="nickMask"></div>  <div class="nick-dialog" id="nickDialog">
     <div class="nick-title">修改聊天对象名</div>
     <input id="nickInput" type="text" maxlength="30" placeholder="请输入名称">
@@ -575,7 +598,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     if (statusRow) { statusRow.remove(); statusRow = null; }
   }
 
-  /* ── 多选删除（仅手机端隐藏，电脑端会话保留） ── */
+  /* ── 长按气泡：文字消息给「复制 / 多选」，语音条另有自己的菜单 ── */
   function attachLongPress(row) {
     row._lpAt = 0;
     var timer = null;
@@ -588,9 +611,7 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
       timer = setTimeout(function () {
         if (!moved) {
           row._lpAt = Date.now();
-          enterSelectMode();
-          var id = row.dataset.id;
-          if (id) { selectedIds[id] = true; updateRowChecks(); }
+          openTextSheet(row);
         }
       }, 500);
     }, { passive: true });
@@ -871,16 +892,23 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
       showChat();
       if (s.background) applyBackground(s.background);
       (s.hiddenIds || []).forEach(function (id) { hiddenSet[id] = true; });
-      bindVoiceHistory(s.history || []).then(function () {
+      bindVoiceHistory(s.history || []).then(function (voiceByMsg) {
         (s.history || []).forEach(function (m) {
           if (m.id && hiddenSet[m.id]) return;
           if (m.id) seenMsgIds[m.id] = true;
-          // 语音产生的消息由语音条呈现，不再重复显示【语音】文本气泡
-          if (m.role === 'user' && typeof m.text === 'string' && m.text.indexOf('【语音】') === 0) return;
+          // 语音产生的消息就地渲染成语音条，不再重复显示【语音】文本气泡；
+          // 必须在这里按历史顺序插入，否则所有语音条都会跑到列表末尾。
+          if (m.role === 'user' && typeof m.text === 'string' && m.text.indexOf('【语音】') === 0) {
+            var rec = voiceByMsg[m.id];
+            if (rec && !voiceRows[rec.id]) {
+              voiceRecords[rec.id] = rec;
+              addVoiceRow(rec, { id: m.id });
+            }
+            return;
+          }
           if (m.role === 'user') addRow('me', m.text, cfg.avatarMe, m.id);
           else addAssistant(m.text, m.id);
         });
-        flushVoiceRenders();
       });
       sttReady = !!(s.stt && s.stt.ready);
       if (s.busy) setStatus('正在思考');
@@ -1315,10 +1343,12 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     }, 1500);
   }
 
-  /* 载入历史语音条：把会话里的「【语音】…」文本消息渲染成语音条。 */
+  /* 载入历史语音条：把会话里的「【语音】…」文本消息映射到语音记录。
+     返回 msgId -> rec；渲染时必须在原消息位置就地插入，不能统一追加到列表末尾。 */
   function bindVoiceHistory(history) {
     return api('/api/wechat/voices').then(function (r) {
-      if (!r || r.ok !== true || !r.voice) return history;
+      var byMsg = {};
+      if (!r || r.ok !== true || !r.voice) return byMsg;
       var queue = r.voice.slice();
       var used = 0;
       for (var i = 0; i < history.length; i++) {
@@ -1330,22 +1360,10 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
         used += 1;
         // 已删除（隐藏）的语音条不再重建：否则刷新后会被重新画出来
         if (m.id && hiddenSet[m.id]) continue;
-        voiceRecords[rec.id] = rec;
-        pendingVoiceRenders.push({ id: rec.id, msgId: m.id, rec: rec });
+        byMsg[m.id] = rec;
       }
-      return history;
+      return byMsg;
     });
-  }
-  var pendingVoiceRenders = [];
-
-  function flushVoiceRenders() {
-    for (var i = 0; i < pendingVoiceRenders.length; i++) {
-      var p = pendingVoiceRenders[i];
-      if (voiceRows[p.id]) continue;
-      if (p.msgId && hiddenSet[p.msgId]) continue;
-      addVoiceRow(p.rec, { id: p.msgId });
-    }
-    pendingVoiceRenders = [];
   }
 
   /* 乐观插入、还没拿到会话消息 id 的语音条（用于回填 id 以便删除）。 */
@@ -1390,6 +1408,71 @@ window.__WECHAT_CLIENT__ = __WECHAT_CLIENT_VALUE__;
     if (!selectMode) enterSelectMode();
     var id = row.dataset.id;
     if (id) { selectedIds[id] = true; updateRowChecks(); }
+  });
+
+  /* ── 文字消息操作菜单：复制文字 / 多选删除 ─────────────── */
+  var textSheetRow = null;
+  var textSheetMask = document.getElementById('textSheetMask');
+  var textSheet = document.getElementById('textSheet');
+  function closeTextSheet() {
+    textSheet.classList.remove('show');
+    textSheetMask.classList.remove('show');
+    textSheetRow = null;
+  }
+  function openTextSheet(row) {
+    textSheetRow = row;
+    var text = rowText(row);
+    document.getElementById('textCopyBtn').textContent = text === '' ? '复制文字（无内容）' : '复制文字';
+    document.getElementById('textCopyBtn').disabled = text === '';
+    textSheetMask.classList.add('show');
+    textSheet.classList.add('show');
+  }
+  /** 气泡里的纯文本（assistant 长回复被拆成多行时，只取当前这一条）。 */
+  function rowText(row) {
+    var bub = row.querySelector('.bubble');
+    return bub ? (bub.textContent || '') : '';
+  }
+  /** 复制到剪贴板：先试异步 API，失败回退到 execCommand（旧 WebView 只能走这条）。 */
+  function legacyCopyText(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { ta.setSelectionRange(0, text.length); } catch (e) {}
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  }
+  function copyText(text) {
+    if (text === '') { toastText('这条没有可复制的文字'); return; }
+    var fallback = function () { toastText(legacyCopyText(text) ? '已复制' : '复制失败，可在电脑上选中复制'); };
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(text).then(function () { toastText('已复制'); }, fallback);
+        return;
+      }
+    } catch (e) {}
+    fallback();
+  }
+  textSheetMask.addEventListener('click', closeTextSheet);
+  document.getElementById('textSheetCancel').addEventListener('click', closeTextSheet);
+  document.getElementById('textCopyBtn').addEventListener('click', function () {
+    var row = textSheetRow;
+    closeTextSheet();
+    if (row) copyText(rowText(row));
+  });
+  document.getElementById('textSelectBtn').addEventListener('click', function () {
+    var row = textSheetRow;
+    closeTextSheet();
+    if (!row) return;
+    if (!selectMode) enterSelectMode();
+    var id = row.dataset.id;
+    if (id) { selectedIds[id] = true; updateRowChecks(); }
+    else toastText('这条消息还没有电脑侧的记录 id，无法多选删除');
   });
 
   /* ── 扫码 / 配对 ───────────────────────── */

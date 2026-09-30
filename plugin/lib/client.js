@@ -51,6 +51,8 @@ window.__ModuleLoader__.load({
      * 桌面端：在应用内叠加一层同源 iframe 显示 `/whale-panel`。
      * iframe 直连 dsh-app 协议即可；若壳没有转发（内容为空），退化为取回 HTML
      * 写进 srcdoc，两条路都是同源，面板的接口调用都能带上 Host 凭据。
+     * 顶部工具条始终可见，左上角是「← 返回聊天」；Esc 也能退出（焦点在 iframe 里
+     * 时父文档收不到按键，所以在同源 iframe 文档上再挂一次）。
      */
     function openPanelOverlay() {
       if (overlayHost !== null) return;
@@ -62,25 +64,25 @@ window.__ModuleLoader__.load({
 
       var bar = document.createElement("div");
       bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 12px;"
-        + "background:#ededed;border-bottom:1px solid #e2e2e2";
+        + "background:#07c160;color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.18);flex:0 0 auto";
+
+      var back = document.createElement("button");
+      back.type = "button";
+      back.textContent = "← 返回聊天";
+      back.setAttribute("aria-label", "返回聊天窗口");
+      back.style.cssText = "height:30px;padding:0 14px;border:0;border-radius:8px;"
+        + "background:#ffffff;color:#07a653;font-size:14px;font-weight:600;cursor:pointer";
+      back.addEventListener("click", closePanel);
 
       var label = document.createElement("span");
-      label.textContent = "鲸聊 · 配对";
-      label.style.cssText = 'margin-right:auto;color:#666;font-size:13px;'
+      label.textContent = "扫完码点左上角「返回聊天」";
+      label.style.cssText = "margin-left:auto;font-size:12px;opacity:.92;"
         + 'font-family:-apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif';
-
-      var close = document.createElement("button");
-      close.type = "button";
-      close.textContent = "关闭";
-      close.setAttribute("aria-label", "关闭鲸聊配对面板");
-      close.style.cssText = "height:28px;padding:0 14px;border:0;border-radius:8px;"
-        + "background:#07c160;color:#fff;font-size:13px;cursor:pointer";
-      close.addEventListener("click", closePanel);
 
       var frame = document.createElement("iframe");
       frame.id = OVERLAY_ID + "-frame";
       frame.title = "鲸聊配对面板";
-      frame.style.cssText = "flex:1;width:100%;border:0;background:#ededed";
+      frame.style.cssText = "flex:1 1 auto;width:100%;border:0;background:#ededed";
       frame.setAttribute("src", "/whale-panel");
 
       var fallback = function () {
@@ -100,10 +102,19 @@ window.__ModuleLoader__.load({
         try { doc = frame.contentDocument; } catch (e) { doc = null; }
         if (!doc || !doc.body || doc.body.childElementCount === 0) fallback();
       }, 2500);
-      frame.addEventListener("load", function () { clearTimeout(timer); });
+      frame.addEventListener("load", function () {
+        clearTimeout(timer);
+        try {
+          var doc = frame.contentDocument;
+          if (doc && !doc.__dshWhaleEsc) {
+            doc.__dshWhaleEsc = true;
+            doc.addEventListener("keydown", onKeyDown);
+          }
+        } catch (e) { /* 跨源时忽略 */ }
+      });
 
+      bar.appendChild(back);
       bar.appendChild(label);
-      bar.appendChild(close);
       host.appendChild(bar);
       host.appendChild(frame);
       document.body.appendChild(host);
@@ -111,10 +122,11 @@ window.__ModuleLoader__.load({
       overlayHost = host;
     }
 
-    /** 侧栏入口：Web 开新标签页，桌面端开应用内叠加层。 */
+    /** 侧栏入口：Web 开新标签页，桌面端开应用内叠加层；已打开时再点即关闭。 */
     function openPanel() {
-      if (isDesktopApp()) { openPanelOverlay(); return; }
-      window.open("/whale-panel", "_blank");
+      if (!isDesktopApp()) { window.open("/whale-panel", "_blank"); return; }
+      if (overlayHost !== null) { closePanel(); return; }
+      openPanelOverlay();
     }
 
     function Entry() {

@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.5** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.5.1** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -140,7 +140,7 @@ session appears in the PC sidebar.
 | Item | Web (3080) | Desktop (19387) |
 | --- | --- | --- |
 | Port | `webserver.config.port` (default 3080) | shell default 19387; overridable by a `webserver.config.port` patch |
-| Sidebar entry | opens `/whale-panel` in a new tab | in-app same-origin iframe panel (the shell rejects `window.open` to a dsh-app URL, and a system browser has no Host credential — it would get 401) |
+| Sidebar entry | opens `/whale-panel` in a new tab | in-app same-origin iframe panel (top-left “← 返回聊天”; Esc also exits, and clicking the icon again closes it) |
 | Local panel URL | `http://127.0.0.1:3080/whale-panel` | `http://127.0.0.1:19387/whale-panel` |
 | Phone connection | the public tunnel URL, independent of the port | same; running both carriers with `autoTunnel` opens two tunnels — keep only one running |
 
@@ -222,6 +222,8 @@ outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
 ## Known limitations
 
 - Chat payloads are text only: voice is transcribed locally before sending; code blocks / markdown render as plain text.
+- Long-pressing a text bubble opens a “copy text / multi-select delete” menu (it used to jump straight into multi-select); long-pressing a voice bubble still shows “to text / delete / cancel”.
+- Voice bubbles render at their real position in the session history, so a reconnect no longer stacks every clip at the bottom of the list.
 - **Machine-injected context never reaches the phone**: since 0.2 the host emits the
   runtime-context snapshot (`source.kind = runtime-context`) and `AGENTS.md` / skill
   catalog `<system-reminder>` blocks as `user/message` events too. The plugin forwards

@@ -100,17 +100,29 @@ test('桌面端：window.open 会被壳拒绝，改为应用内同源 iframe 叠
   assert.equal(frame.parentNode, host)
 })
 
-test('桌面端：重复点击不叠出第二层，关闭按钮移除叠加层', () => {
+test('桌面端：再点一次图标即关闭（toggle），不会叠出第二层', () => {
   const env = loadClient({ protocol: 'dsh-app:' })
   env.exports.openPanel()
   const first = env.byId.get('dsh-wechat-chat-panel')
+  assert.ok(first, '第一次点击打开')
   env.exports.openPanel()
-  assert.equal(env.body.children.filter((c) => c.id === 'dsh-wechat-chat-panel').length, 1)
-  assert.equal(env.byId.get('dsh-wechat-chat-panel'), first)
-  const close = first.children[0].children.find((c) => c.tagName === 'BUTTON')
-  assert.ok(close, '工具条里有关闭按钮')
-  close.click()
-  assert.equal(first.parentNode, null, '关闭后从 DOM 上摘掉')
+  assert.equal(first.parentNode, null, '第二次点击关闭')
+  assert.deepEqual(env.body.children, [])
+  env.exports.openPanel()
+  assert.ok(env.byId.get('dsh-wechat-chat-panel'), '第三次点击重新打开')
+  assert.equal(env.body.children.filter((c) => c.id === 'dsh-wechat-chat-panel').length, 1, '始终只有一层')
+})
+
+test('桌面端：返回按钮在工具条最左侧，点击后移除叠加层', () => {
+  const env = loadClient({ protocol: 'dsh-app:' })
+  env.exports.openPanel()
+  const host = env.byId.get('dsh-wechat-chat-panel')
+  const bar = host.children[0]
+  const back = bar.children[0]
+  assert.equal(back.tagName, 'BUTTON')
+  assert.match(back.textContent, /返回/)
+  back.click()
+  assert.equal(host.parentNode, null, '关闭后从 DOM 上摘掉')
   assert.deepEqual(env.body.children, [])
 })
 
