@@ -1359,8 +1359,10 @@ export function apply(ctx, config = {}) {
           case 'turn/end': {
             const reason = ev.data && ev.data.reason
             const kind = reason && reason.kind
-            if (kind === 'error') broadcast(device, { type: 'error', message: (reason && reason.message) || '处理出错了' })
-            else if (kind === 'blocked') broadcast(device, { type: 'error', message: '回复被安全策略阻止' })
+            if (kind === 'error') {
+              const detail = reason.message || (reason.error && reason.error.message) || '处理出错了'
+              broadcast(device, { type: 'error', message: detail })
+            } else if (kind === 'blocked') broadcast(device, { type: 'error', message: '回复被安全策略阻止' })
             else if (kind === 'max-tokens') broadcast(device, { type: 'error', message: '回复达到长度上限' })
             else if (kind === 'completed' && !sentAssistant) broadcast(device, { type: 'assistant', text: '（无文本回复）' })
             done = true
