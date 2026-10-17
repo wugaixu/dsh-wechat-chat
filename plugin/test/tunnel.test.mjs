@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { TunnelManager } from '../lib/index.js'
+import { TunnelManager, funnelArgs } from '../lib/index.js'
 
 /** 起一个临时 HTTP 服务，模拟 cloudflared 的本地 /ready 端点。 */
 function readyServer(payload) {
@@ -103,4 +103,9 @@ test('连接器恢复后就绪状态回归且地址不变', async () => {
   assert.equal(manager.connected, true)
   assert.equal(manager.readySince, undefined)
   assert.equal(manager.url, 'https://recovers.trycloudflare.com')
+})
+
+test('funnelArgs points at the given port', () => {
+  assert.deepEqual(funnelArgs(4321), ['funnel', '--bg', '4321'])
+  assert.deepEqual(funnelArgs(0), ['funnel', '--bg', '0'])
 })

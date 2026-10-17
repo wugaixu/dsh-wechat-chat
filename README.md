@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.6.0** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.7.0** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -31,6 +31,7 @@
   复制链接、刷新、断开全部设备，并显示公网隧道状态。二维码默认指向**免费公网隧道**
   （Cloudflare quick tunnel，无需账号、不花钱、`cloudflared` 二进制随包分发）；
   隧道未就绪时回落到第一块局域网网卡地址；也可配置 `publicBaseUrl` 使用自备隧道。
+  想要**固定不变**的公网地址，见下面的「固定公网地址（Tailscale Funnel）」。
 - 安全模型与原远程插件一致：一次性令牌（10 分钟）、设备会话持久化
   （`$DSH_HOME/whale-devices.json`，30 天闲置失效、上限 4 台、FIFO 淘汰）、
   配对控制端点仅限回环、非回环的聊天接口必须携带存活设备凭据。
@@ -165,8 +166,9 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
 | `model` | `deepseek-v4-flash` | 模型 |
 | `reasoningEffort` | `low` | 推理强度 |
 | `autoTunnel` | `true` | 自动开免费 Cloudflare quick tunnel |
+| `funnel` | `false` | `true` 时把带密码的本地网关挂到 Tailscale Funnel（配合 `publicBaseUrl` 得到固定地址，见下文） |
 | `tunnelPassword` | 空 | 仅用于旧配置首次迁移；迁移后必须从 YAML 删除，推荐直接在本机面板设置 |
-| `publicBaseUrl` | 无 | 自备公网地址（不经过内置密码网关） |
+| `publicBaseUrl` | 无 | 固定公网地址。配合 `funnel: true` 时经内置密码网关；单独使用表示自备反代地址 |
 | `tokenTtlMs` | `600000` | 配对令牌有效期（毫秒） |
 | `idleExpireMs` | `2592000000` | 设备闲置失效（30 天） |
 | `maxDevices` | `4` | 最大配对设备数 |
@@ -179,6 +181,34 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
 **头像 / 背景**：手机 App 内点头像即可修改（或把图片放到 `$DSH_HOME/wechat-chat/avatars/`：
 `other.*` 对方头像、`me.*` 自己头像、`background.*` 聊天背景）。
 **界面样式**：改 `plugin/lib/chat-page.html` 内的 CSS（改动后刷新页面即可，无需重启）。
+
+## 固定公网地址（Tailscale Funnel，可选）
+
+免费 quick tunnel 每次启动都会换一个随机域名，重启即失效。想要一个长期不变的地址，
+可以让插件在启动时把**带密码的本地网关**挂到 Tailscale Funnel 上：Tailscale 免费额度足够，
+手机端不需要装任何东西。
+
+```powershell
+winget install --id Tailscale.Tailscale -e
+tailscale up            # 浏览器登录一次，免费账号即可
+tailscale status --json # 看 Self.DNSName，例如 dsh-pc.tail39fc54.ts.net.
+```
+
+首次开启 Funnel 时 CLI 会给出一个 `https://login.tailscale.com/f/funnel?node=...` 链接，
+在管理台点一次 Enable Funnel。然后在 profile 的 `cordis.patch.yml` 里覆盖插件配置：
+
+```yaml
+- id: wechat-chat
+  name: dsh-wechat-chat
+  config:
+    autoTunnel: false
+    publicBaseUrl: https://dsh-pc.tail39fc54.ts.net
+    funnel: true
+```
+
+之后每次启动，插件都会把 Funnel 指向当前端口的安全网关——只放行 `/wechat` 与
+`/api/wechat/*`，其余路径 404、未配对 401，DSH 端口或进程怎么变，公网域名都不变。
+Tailscale 未运行或 Funnel 挂载失败时，面板会显示具体错误，并每 15 秒重试。
 
 ## 免费本地语音输入
 
@@ -222,6 +252,7 @@ bundle patch 解析不到这个核心包名，所以声明行必须由 profile p
   人的消息（`source.kind === 'user'`），其余一律不进手机气泡；没有来源字段的旧运行时保持原行为。
 - 免费公网隧道每次重启 dsh web 会换地址（trycloudflare 快隧道的特性）：换地址后
   手机 App 重新扫一次码即可（扫码同时更新服务器地址并配对）；局域网内使用不受影响。
+  想要固定地址就开 `funnel: true`（见「固定公网地址（Tailscale Funnel）」），重启不再换。
 - 拿到隧道地址后，插件会查 cloudflared 的**本地 `/ready`**（毫秒级）确认连接器已注册到 Cloudflare；
   未就绪时面板显示「正在连接 Cloudflare…」，就绪后自动出码。这个判定完全在本机完成，
   不经过公网、也不受本机代理影响。

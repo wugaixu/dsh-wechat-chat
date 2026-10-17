@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.6.0** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.7.0** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -175,8 +175,9 @@ Plugin `config` in `cordis.patch.yml` (all optional):
 | `model` | `deepseek-v4-flash` | model |
 | `reasoningEffort` | `low` | reasoning effort |
 | `autoTunnel` | `true` | auto-start a free Cloudflare quick tunnel |
+| `funnel` | `false` | `true` maps the password gateway onto Tailscale Funnel (use with `publicBaseUrl` for a stable address) |
 | `tunnelPassword` | empty | legacy bootstrap migration only; remove it from YAML after migration and prefer the local panel |
-| `publicBaseUrl` | none | your own public base (does not pass through the built-in password gateway) |
+| `publicBaseUrl` | none | fixed public base. With `funnel: true` it goes through the built-in password gateway; alone it means your own reverse proxy |
 | `tokenTtlMs` | `600000` | pairing token validity (ms) |
 | `idleExpireMs` | `2592000000` | device idle expiry (30 days) |
 | `maxDevices` | `4` | max paired devices |
@@ -190,6 +191,36 @@ Plugin `config` in `cordis.patch.yml` (all optional):
 into `$DSH_HOME/wechat-chat/avatars/`: `other.*` assistant avatar, `me.*` your
 avatar, `background.*` chat background).
 **Styling**: edit the CSS in `plugin/lib/chat-page.html` (refresh the page, no restart).
+
+## Stable public address (Tailscale Funnel, optional)
+
+The free quick tunnel gets a new random hostname on every start, so a restart breaks the
+phone's saved URL. For a permanent address, let the plugin map its **password gateway** onto
+Tailscale Funnel at startup (the free tier is enough; the phone installs nothing):
+
+```powershell
+winget install --id Tailscale.Tailscale -e
+tailscale up            # log in once in the browser (free account)
+tailscale status --json # see Self.DNSName, e.g. dsh-pc.tail39fc54.ts.net.
+```
+
+The first Funnel run prints a `https://login.tailscale.com/f/funnel?node=...` link; enable
+Funnel once in the admin console. Then override the plugin config in the profile's
+`cordis.patch.yml`:
+
+```yaml
+- id: wechat-chat
+  name: dsh-wechat-chat
+  config:
+    autoTunnel: false
+    publicBaseUrl: https://dsh-pc.tail39fc54.ts.net
+    funnel: true
+```
+
+On every start the plugin points Funnel at the current security gateway — only `/wechat`
+and `/api/wechat/*` are reachable (everything else 404, unpaired calls 401), and the public
+hostname never changes when the DSH port or process does. If Tailscale is down or Funnel
+fails, the panel shows the error and retries every 15 seconds.
 
 ## Free local voice input
 

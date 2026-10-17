@@ -24,6 +24,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkS
 import { join, dirname } from 'node:path'
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
+import { spawn as spawnProcess } from 'node:child_process'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { inspectPcmWav, LocalSttManager } from './stt.js'
@@ -1147,6 +1148,11 @@ async function fetchDeepSeekBalance() {
 
 /* ── plugin ───────────────────────────────────────────────────────────── */
 
+/** CLI arguments that point Tailscale Funnel at a local port. */
+export function funnelArgs(port) {
+  return ['funnel', '--bg', String(port)]
+}
+
 export function apply(ctx, config = {}) {
   const defaultNickname = config.nickname || DEFAULT_NICKNAME
   const sessionTitle = config.title || DEFAULT_TITLE
@@ -1161,10 +1167,12 @@ export function apply(ctx, config = {}) {
     offlineAfterMs: config.offlineAfterMs || DEFAULT_OFFLINE_AFTER_MS,
     maxDevices: config.maxDevices || DEFAULT_MAX_DEVICES,
   })
-  const publicBaseUrl = typeof config.publicBaseUrl === 'string' && config.publicBaseUrl !== ''
+  let publicBaseUrl = typeof config.publicBaseUrl === 'string' && config.publicBaseUrl !== ''
     ? config.publicBaseUrl
     : undefined
   const autoTunnel = config.autoTunnel === true
+  // 固定地址模式：把带密码的本地网关挂到 Tailscale Funnel（域名固定、重启不变）。
+  const funnelEnabled = config.funnel === true
   const configuredTunnelPassword = typeof config.tunnelPassword === 'string' ? config.tunnelPassword : ''
   const storedPassword = loadTunnelPasswordState()
   let tunnelPasswordHash = storedPassword.passwordHash
@@ -1488,7 +1496,12 @@ export function apply(ctx, config = {}) {
       return
     }
     const passwordEnabled = tunnelPasswordHash !== ''
-    const html = PANEL
+    // 每次请求都从磁盘读面板：改文案/状态区不用重启 DSH。
+    let panelSource = PANEL
+    try {
+      panelSource = readFileSync(fileURLToPath(new URL('./panel-page.html', import.meta.url)), 'utf8')
+    } catch { /* 回退到启动时缓存的版本 */ }
+    const html = panelSource
       .replace('__QRCODE_LIB__', () => QRCODE_LIB)
       .replace('__TUNNEL_PASSWORD_SUB__', passwordEnabled ? '，并启用密码保护' : '')
       .replace('__TUNNEL_PASSWORD_HINT__', passwordEnabled ? '首次扫码先输入公网登录密码，再完成配对。' : '一次扫码即完成配对。')
@@ -1618,7 +1631,14 @@ export function apply(ctx, config = {}) {
 
     if (pathname === '/api/whale/pair/tunnel') {
       if (!loopbackFence(req) || req.method !== 'GET') { writeJson(res, req.method === 'GET' ? 403 : 405, { ok: false, code: 'forbidden' }); return }
-      writeJson(res, 200, { ok: true, autoTunnel, tunnel: tunnel.info(), deviceCount: service.deviceCount() })
+      writeJson(res, 200, {
+        ok: true,
+        autoTunnel,
+        ...(publicBaseUrl !== undefined ? { publicBaseUrl } : {}),
+        tunnel: tunnel.info(),
+        ...(funnelEnabled ? { funnel: { enabled: funnelState.enabled, error: funnelState.error, url: publicBaseUrl } } : {}),
+        deviceCount: service.deviceCount(),
+      })
       return
     }
 
@@ -1943,6 +1963,75 @@ export function apply(ctx, config = {}) {
     writeJson(res, 404, { ok: false, code: 'not-found' })
   }
 
+  /* ── 固定公网地址：把安全网关挂到 Tailscale Funnel ───────────────── */
+
+  const funnelState = { enabled: false, error: undefined }
+  let funnelTimer = undefined
+
+  function tailscaleCommand() {
+    const explicit = typeof process.env.TAILSCALE_BIN === 'string' && process.env.TAILSCALE_BIN !== ''
+      ? process.env.TAILSCALE_BIN
+      : undefined
+    if (explicit !== undefined && existsSync(explicit)) return explicit
+    if (process.platform === 'win32') {
+      const base = process.env['ProgramFiles'] || 'C:\\Program Files'
+      const candidate = join(base, 'Tailscale', 'tailscale.exe')
+      if (existsSync(candidate)) return candidate
+    }
+    return 'tailscale'
+  }
+
+  function runTailscale(args, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let child
+      try {
+        child = spawnProcess(tailscaleCommand(), args, { windowsHide: true })
+      } catch (err) {
+        reject(err)
+        return
+      }
+      let output = ''
+      const collect = (chunk) => {
+        output += String(chunk)
+        if (output.length > 8000) output = output.slice(-8000)
+      }
+      child.stdout.on('data', collect)
+      child.stderr.on('data', collect)
+      const timer = setTimeout(() => { try { child.kill() } catch { /* gone */ } }, timeoutMs)
+      timer.unref?.()
+      child.on('error', (err) => { clearTimeout(timer); reject(err) })
+      child.on('exit', (code) => {
+        clearTimeout(timer)
+        if (code === 0) { resolve(output); return }
+        const tail = output.trim().split('\n').filter(Boolean).slice(-1)[0]
+        reject(new Error(tail || `tailscale exited ${String(code)}`))
+      })
+    })
+  }
+
+  async function applyFunnel(port) {
+    try {
+      await runTailscale(funnelArgs(port), 60_000)
+      funnelState.enabled = true
+      funnelState.error = undefined
+      console.log(`wechat-chat: Tailscale Funnel 已指向 127.0.0.1:${String(port)}`)
+      if (publicBaseUrl === undefined) {
+        try {
+          const status = JSON.parse(await runTailscale(['status', '--json'], 15_000))
+          const host = String((status && status.Self && status.Self.DNSName) || '').replace(/\.$/, '')
+          if (host !== '') publicBaseUrl = `https://${host}`
+        } catch { /* 保留未设置，回退到局域网地址 */ }
+      }
+    } catch (err) {
+      funnelState.enabled = false
+      funnelState.error = (err && err.message) || String(err)
+      console.error(`wechat-chat: Tailscale Funnel 启动失败：${funnelState.error}`)
+      clearTimeout(funnelTimer)
+      funnelTimer = setTimeout(() => { void applyFunnel(port) }, 15_000)
+      funnelTimer.unref?.()
+    }
+  }
+
   ctx.effect(() => {
     const disposers = [
       ctx.webServer.register({ kind: 'exact', path: '/wechat', handler: handlePage }),
@@ -1953,9 +2042,15 @@ export function apply(ctx, config = {}) {
     const timer = setInterval(() => { service.sweep() }, 10_000)
     timer.unref()
     let active = true
-    if (autoTunnel) {
+    if (autoTunnel || funnelEnabled) {
       void authGateway.start().then((gatewayTarget) => {
         if (!active) { authGateway.stop(); return }
+        if (funnelEnabled) {
+          const gatewayPort = Number(new URL(gatewayTarget).port)
+          console.log(`wechat-chat: 公网地址走 Tailscale Funnel（固定域名），网关端口 ${String(gatewayPort)}`)
+          void applyFunnel(gatewayPort)
+          return
+        }
         tunnel.target = gatewayTarget
         tunnel.start()
         console.log(`wechat-chat: 正在启动${tunnelPasswordHash !== '' ? '带密码保护的' : '受限路径的'}免费公网隧道（Cloudflare quick tunnel）…`)
@@ -1965,6 +2060,7 @@ export function apply(ctx, config = {}) {
     }
     return () => {
       active = false
+      clearTimeout(funnelTimer)
       for (const dispose of disposers) dispose()
       clearInterval(timer)
       tunnel.dispose()

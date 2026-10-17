@@ -62,7 +62,7 @@
       </svg>
     </div>
     <h1>鲸聊 · 配对</h1>
-    <p class="sub">用手机「鲸聊」App 扫一扫连接<br>经免费公网隧道（Cloudflare，无需账号）__TUNNEL_PASSWORD_SUB__</p>
+    <p class="sub">用手机「鲸聊」App 扫一扫连接<br><span id="netHint">经免费公网隧道（Cloudflare，无需账号）</span>__TUNNEL_PASSWORD_SUB__</p>
 
     <div id="tun">正在连接公网隧道…</div>
     <section class="security">
@@ -95,7 +95,7 @@
     </div>
 
     <div id="msg"></div>
-    <div class="hint">二维码 10 分钟内有效；__TUNNEL_PASSWORD_HINT__<br>本页面仅限电脑本机打开（127.0.0.1）。<br>公网地址每次重启会变，手机重新扫码即可。</div>
+    <div class="hint">二维码 10 分钟内有效；__TUNNEL_PASSWORD_HINT__<br>本页面仅限电脑本机打开（127.0.0.1）。<br><span id="addrHint">公网地址每次重启会变，手机重新扫码即可。</span></div>
   </div>
 
 <script>
@@ -238,7 +238,7 @@ __QRCODE_LIB__
         if (r && r.ok === true) {
           renderQR(r.url);
           link.value = r.url;
-          qrOrigin = (r.tunnel && r.tunnel.url) || null;
+          qrOrigin = (r.tunnel && r.tunnel.url) || r.publicBaseUrl || null;
           var mins = Math.max(1, Math.round((r.expiresAt - Date.now()) / 60000));
           setMsg('二维码有效 ' + mins + ' 分钟，等待手机扫码…');
         } else {
@@ -260,7 +260,31 @@ __QRCODE_LIB__
       .then(function (r) {
         if (!r || r.ok !== true) { tunEl.textContent = '服务不可用'; tunEl.className = 'err'; return; }
         var t = r.tunnel || {};
-        if (t.phase === 'running' && t.url) {
+        var f = r.funnel;
+        if (f) {
+          // 固定地址模式（Tailscale Funnel）：域名不随重启变化，出码后一直有效。
+          var funnelBase = r.publicBaseUrl || f.url || '';
+          if (f.enabled === true) {
+            tunnelRunning = true;
+            tunEl.textContent = '固定公网地址已就绪 ' + funnelBase;
+            tunEl.className = '';
+            var netHint = document.getElementById('netHint');
+            if (netHint) netHint.textContent = '经固定公网地址（Tailscale Funnel）';
+            var addrHint = document.getElementById('addrHint');
+            if (addrHint) addrHint.textContent = '公网地址固定，重启后无需重扫。';
+            if (qrOrigin !== null && qrOrigin !== funnelBase) {
+              document.getElementById('qr').innerHTML = '';
+              link.value = '';
+              hasQr = false;
+              qrOrigin = null;
+            }
+            if (!hasQr) refresh();
+          } else {
+            tunnelRunning = false;
+            tunEl.textContent = '固定公网地址未就绪（' + (f.error || 'Tailscale Funnel 未启动') + '）';
+            tunEl.className = 'err';
+          }
+        } else if (t.phase === 'running' && t.url) {
           if (t.connected !== true) {
             // 连接器还没注册到 Cloudflare 边缘，此时出码手机连不上
             tunnelRunning = false;
