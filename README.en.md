@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.7.0** · MIT License
+> Repo: <https://github.com/wugaixu/dsh-wechat-chat> · Version **1.7.1** · MIT License
 
 Turn your PC's DeepSeek Harness Web into a "WeChat-style chat": install the
 Android app "鲸聊" (Whale Chat), scan a QR code to pair, then text the agent on
@@ -303,7 +303,7 @@ outputs, `local.properties`, and runtime user data (`avatars/`); the prebuilt
 
 ## Security
 
-The free Quick Tunnel always targets a loopback-only security gateway instead of the full DSH Web server. The gateway exposes only `/wechat`, `/api/wechat/*`, and the pairing-status endpoints required by the app. The password can be managed only from the local pairing panel; the server stores only a randomly salted scrypt hash in `$DSH_HOME/wechat-chat-settings.json`, never the plaintext. The first scan asks for the password and then stores a 30-day `HttpOnly + Secure + SameSite=Lax` login cookie. Changing the password invalidates every existing public login immediately, and eight consecutive failures lock that source for one minute.
+The free Quick Tunnel always targets a loopback-only security gateway instead of the full DSH Web server. The gateway exposes only `/wechat`, `/api/wechat/*`, and the pairing-status endpoints required by the app. The password can be managed only from the local pairing panel; the server stores only a randomly salted scrypt hash in `$DSH_HOME/wechat-chat-settings.json`, never the plaintext. The first scan asks for the password and then stores a 30-day `HttpOnly + Secure + SameSite=Lax` login cookie whose signing key lives in `$DSH_HOME/wechat-chat/tunnel-secret`, so a DSH restart no longer logs the phone out. Changing the password rotates that key and invalidates every existing public login immediately; eight consecutive failures lock that source for one minute.
 
 A paired device is a full-control credential (same model as the existing remote
 plugin). Stop/revoke pairing immediately cuts the channel; the chat page and API

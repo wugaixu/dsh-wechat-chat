@@ -499,10 +499,11 @@ function loginPage(next, error = '') {
 }
 
 export class TunnelAuthGateway {
-  constructor(upstreamPort, passwordHash) {
+  constructor(upstreamPort, passwordHash, secret) {
     this.upstreamPort = upstreamPort
     this.passwordHash = passwordHash
-    this.secret = randomBytes(32)
+    // 默认用落盘的密钥：跨重启保持登录态。测试可显式传 secret。
+    this.secret = secret instanceof Buffer && secret.length >= 16 ? secret : loadOrCreateTunnelSecret()
     this.authValue = createHmac('sha256', this.secret).update('whale-tunnel-auth-v1').digest('base64url')
     this.server = undefined
     this.failures = new Map()
@@ -531,7 +532,9 @@ export class TunnelAuthGateway {
 
   setPasswordHash(passwordHash) {
     this.passwordHash = passwordHash
+    // 换密码时轮换密钥并落盘：所有旧的公网登录立即失效，新登录在重启后继续有效。
     this.secret = randomBytes(32)
+    writeTunnelSecret(this.secret)
     this.authValue = createHmac('sha256', this.secret).update('whale-tunnel-auth-v1').digest('base64url')
     this.failures.clear()
   }
@@ -1110,6 +1113,38 @@ function loadTunnelPasswordState() {
 
 function persistTunnelPasswordHash(passwordHash) {
   return persistChatSettings({ tunnelPasswordHash: passwordHash, tunnelPassword: undefined })
+}
+
+/**
+ * 公网登录 cookie 的 HMAC 密钥。必须跨重启保持不变：以前每次启动随机生成，
+ * 结果是 DSH 一重启，手机上已登录的会话全部 401（表现为“发送失败”）。
+ * 换密码时会重新生成并落盘，从而让所有旧登录立即失效。
+ */
+const TUNNEL_SECRET_FILE = join(home, 'wechat-chat', 'tunnel-secret')
+
+function readTunnelSecret() {
+  try {
+    const saved = readFileSync(TUNNEL_SECRET_FILE, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/i.test(saved)) return Buffer.from(saved, 'hex')
+  } catch { /* 首次运行或文件损坏 */ }
+  return undefined
+}
+
+function writeTunnelSecret(secret) {
+  try {
+    mkdirSync(dirname(TUNNEL_SECRET_FILE), { recursive: true })
+    const temp = `${TUNNEL_SECRET_FILE}.${String(process.pid)}.tmp`
+    writeFileSync(temp, secret.toString('hex'), { mode: 0o600 })
+    renameSync(temp, TUNNEL_SECRET_FILE)
+  } catch { /* 落盘失败时退回内存密钥，不影响本次运行 */ }
+}
+
+function loadOrCreateTunnelSecret() {
+  const saved = readTunnelSecret()
+  if (saved !== undefined) return saved
+  const secret = randomBytes(32)
+  writeTunnelSecret(secret)
+  return secret
 }
 
 /* ── DeepSeek 余额 ──────────────────────────────────────────────────────── */

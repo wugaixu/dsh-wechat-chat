@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { TunnelManager, funnelArgs } from '../lib/index.js'
+import { TunnelManager, TunnelAuthGateway, funnelArgs } from '../lib/index.js'
 
 /** 起一个临时 HTTP 服务，模拟 cloudflared 的本地 /ready 端点。 */
 function readyServer(payload) {
@@ -108,4 +108,13 @@ test('连接器恢复后就绪状态回归且地址不变', async () => {
 test('funnelArgs points at the given port', () => {
   assert.deepEqual(funnelArgs(4321), ['funnel', '--bg', '4321'])
   assert.deepEqual(funnelArgs(0), ['funnel', '--bg', '0'])
+})
+
+test('gateway auth value survives a restart with the same secret', () => {
+  const secret = Buffer.alloc(32, 7)
+  const first = new TunnelAuthGateway(1, 'scrypt$salt$hash', secret)
+  const second = new TunnelAuthGateway(2, 'scrypt$salt$hash', secret)
+  assert.equal(first.authValue, second.authValue)
+  const rotated = new TunnelAuthGateway(1, 'scrypt$salt$hash', Buffer.alloc(32, 8))
+  assert.notEqual(first.authValue, rotated.authValue)
 })

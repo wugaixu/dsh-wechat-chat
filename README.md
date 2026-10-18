@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.7.0** · 协议 MIT
+> 仓库：<https://github.com/wugaixu/dsh-wechat-chat> · 版本 **1.7.1** · 协议 MIT
 
 把电脑上的 DeepSeek Harness Web 变成「微信聊天」：手机装一个微信风的安卓 App「鲸聊」，
 扫码配对后像微信一样给电脑上的智能体发文字消息；消息落在电脑 Web UI 的
@@ -279,7 +279,7 @@ npm run verify    # 发布自检：node 语法检查 + 干净 tarball 安装 + �
 
 ## 安全
 
-免费 Quick Tunnel 始终先进入一个仅监听回环地址的安全网关，而不会直连整个 DSH Web。网关只放行 `/wechat`、`/api/wechat/*` 和必要的配对状态端点。密码只能通过本机配对面板设置；服务器只在 `$DSH_HOME/wechat-chat-settings.json` 保存带随机盐的 scrypt 哈希，不保存或回传明文。首次扫码需输入密码，成功后写入 30 天有效的 `HttpOnly + Secure + SameSite=Lax` 登录 Cookie；更换密码会立即令所有旧登录失效，连续 8 次失败会锁定来源 1 分钟。
+免费 Quick Tunnel 始终先进入一个仅监听回环地址的安全网关，而不会直连整个 DSH Web。网关只放行 `/wechat`、`/api/wechat/*` 和必要的配对状态端点。密码只能通过本机配对面板设置；服务器只在 `$DSH_HOME/wechat-chat-settings.json` 保存带随机盐的 scrypt 哈希，不保存或回传明文。首次扫码需输入密码，成功后写入 30 天有效的 `HttpOnly + Secure + SameSite=Lax` 登录 Cookie；签名密钥保存在 `$DSH_HOME/wechat-chat/tunnel-secret`，所以 DSH 重启后登录态仍然有效。更换密码会轮换该密钥、立即令所有旧登录失效，连续 8 次失败会锁定来源 1 分钟。
 
 配对设备即完全控制凭据（与现有远程插件同一安全模型）。停止/取消配对会立即
 切断 `/remote` 通道，本插件的聊天页与接口随之不可用。四个控制面
